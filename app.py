@@ -46,44 +46,80 @@ HTML_KODA_KAMERE = """<!DOCTYPE html>
 <div class="cam-wrap">
   <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
   <label for="camInput" class="cam-btn">📷 Odpri kamero telefona</label>
-  <div id="status" class="status">Odpre privzeto kamero telefona (polna ločljivost, ostrenje, bliskavica, povečava).</div>
+  <div id="status" class="status">Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).</div>
 </div>
 <script>
 const camInput = document.getElementById("camInput");
 const statusEl = document.getElementById("status");
+const MAX_STRANICA = 2600;
 
 function sendMessage(type, data) {
   window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
 }
 
 function updateHeight() {
-  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 8 });
+  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 10 });
 }
 
 camInput.addEventListener("change", (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
-  statusEl.textContent = "Nalagam fotografijo v polni ločljivosti ...";
+
+  statusEl.textContent = "Pripravljam fotografijo za analizo ...";
   updateHeight();
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    sendMessage("streamlit:setComponentValue", {
-      value: {
-        name: file.name || "Kamera_listic.jpg",
-        data_url: reader.result,
-        ts: Date.now()
+  const objectUrl = URL.createObjectURL(file);
+  const img = new Image();
+
+  img.onload = () => {
+    try {
+      const origW = img.naturalWidth || img.width;
+      const origH = img.naturalHeight || img.height;
+      const merilo = Math.min(1, MAX_STRANICA / Math.max(origW, origH));
+      const nw = Math.max(1, Math.round(origW * merilo));
+      const nh = Math.max(1, Math.round(origH * merilo));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = nw;
+      canvas.height = nh;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, nw, nh);
+      URL.revokeObjectURL(objectUrl);
+
+      let dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      if (dataUrl.length > 1600000) {
+        dataUrl = canvas.toDataURL("image/jpeg", 0.74);
       }
-    });
-    statusEl.textContent = "Fotografija je zajeta. Klikni znova za naslednji listič.";
+
+      const velKB = Math.round((dataUrl.length * 3) / 4 / 1024);
+
+      sendMessage("streamlit:setComponentValue", {
+        dataType: "json",
+        value: {
+          name: file.name || "Kamera_listic.jpg",
+          data_url: dataUrl,
+          ts: Date.now()
+        }
+      });
+
+      statusEl.textContent = "Fotografija poslana (" + nw + "×" + nh + " px, " + velKB + " KB).";
+      camInput.value = "";
+      updateHeight();
+    } catch (err) {
+      URL.revokeObjectURL(objectUrl);
+      statusEl.textContent = "Napaka pri pripravi slike: " + err.message;
+      updateHeight();
+    }
+  };
+
+  img.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova ali uporabi zavihek Naloži slike.";
     camInput.value = "";
     updateHeight();
   };
-  reader.onerror = () => {
-    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova.";
-    updateHeight();
-  };
-  reader.readAsDataURL(file);
+
+  img.src = objectUrl;
 });
 
 window.addEventListener("message", (event) => {
@@ -187,6 +223,7 @@ with zav2:
             st.session_state.izbrani_listic_select = ime_slike
 
     if st.session_state.kamera_slike:
+        st.caption(f"Zajetih fotografij iz kamere: **{len(st.session_state.kamera_slike)}**")
         if st.button("🗑️ Počisti slike iz kamere"):
             st.session_state.kamera_slike = {}
             st.rerun()
