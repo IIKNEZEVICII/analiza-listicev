@@ -1,9 +1,11 @@
+import base64
 import io
 import os
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Analiza lističev", layout="wide")
 
@@ -16,6 +18,96 @@ from slike import (
     analiziraj_kapljice,
     obarvaj_kapljice_rdece,
 )
+
+# --- KOMPONENTA ZA ODPIRANJE PRIVZETE KAMERE TELEFONA ---
+KAMERA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_kamera_komponenta")
+os.makedirs(KAMERA_MAPA, exist_ok=True)
+KAMERA_INDEX_POT = os.path.join(KAMERA_MAPA, "index.html")
+
+HTML_KODA_KAMERE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 4px 0; font-family: sans-serif; background: transparent; }
+  .cam-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .cam-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    background: #ff4b4b; color: #ffffff; border: none; border-radius: 8px;
+    padding: 12px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15); user-select: none;
+  }
+  .cam-btn:hover { background: #e63e3e; }
+  .cam-btn:active { transform: scale(0.98); }
+  .status { font-size: 12px; color: #7a828e; line-height: 1.4; }
+</style>
+</head>
+<body>
+<div class="cam-wrap">
+  <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
+  <label for="camInput" class="cam-btn">📷 Odpri kamero telefona</label>
+  <div id="status" class="status">Odpre privzeto kamero telefona (polna ločljivost, ostrenje, bliskavica, povečava).</div>
+</div>
+<script>
+const camInput = document.getElementById("camInput");
+const statusEl = document.getElementById("status");
+
+function sendMessage(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+
+function updateHeight() {
+  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 8 });
+}
+
+camInput.addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  statusEl.textContent = "Nalagam fotografijo v polni ločljivosti ...";
+  updateHeight();
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    sendMessage("streamlit:setComponentValue", {
+      value: {
+        name: file.name || "Kamera_listic.jpg",
+        data_url: reader.result,
+        ts: Date.now()
+      }
+    });
+    statusEl.textContent = "Fotografija je zajeta. Klikni znova za naslednji listič.";
+    camInput.value = "";
+    updateHeight();
+  };
+  reader.onerror = () => {
+    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova.";
+    updateHeight();
+  };
+  reader.readAsDataURL(file);
+});
+
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "streamlit:render") {
+    updateHeight();
+  }
+});
+
+sendMessage("streamlit:componentReady", { apiVersion: 1 });
+updateHeight();
+</script>
+</body>
+</html>
+"""
+
+_obstojeca_kamera = ""
+if os.path.exists(KAMERA_INDEX_POT):
+    with open(KAMERA_INDEX_POT, "r", encoding="utf-8") as f:
+        _obstojeca_kamera = f.read()
+if _obstojeca_kamera != HTML_KODA_KAMERE:
+    with open(KAMERA_INDEX_POT, "w", encoding="utf-8") as f:
+        f.write(HTML_KODA_KAMERE)
+
+_komponenta_kamera = components.declare_component("nativna_kamera", path=KAMERA_MAPA)
 
 PRIVZETI_PARAMETRI_LETA = {
     "Višina leta (m)": 3.0,
@@ -35,6 +127,12 @@ if "oglisca_slik" not in st.session_state:
     st.session_state.oglisca_slik = {}
 if "reset_verzija_izreza" not in st.session_state:
     st.session_state.reset_verzija_izreza = {}
+if "kamera_slike" not in st.session_state:
+    st.session_state.kamera_slike = {}
+if "zadnji_kamera_ts" not in st.session_state:
+    st.session_state.zadnji_kamera_ts = None
+if "stevec_kamere" not in st.session_state:
+    st.session_state.stevec_kamere = 0
 
 # --- DRSNO STRANSKO OKNO: PARAMETRI LETA ---
 with st.sidebar:
@@ -73,17 +171,44 @@ with zav1:
         label_visibility="collapsed",
     )
 with zav2:
-    slika_kamere = st.camera_input("Slikaj listič", label_visibility="collapsed")
+    slika_kamere_podatki = _komponenta_kamera(key="nativna_kamera")
+    if (
+        isinstance(slika_kamere_podatki, dict)
+        and slika_kamere_podatki.get("ts") != st.session_state.zadnji_kamera_ts
+        and slika_kamere_podatki.get("data_url")
+    ):
+        st.session_state.zadnji_kamera_ts = slika_kamere_podatki["ts"]
+        data_url = slika_kamere_podatki["data_url"]
+        if "," in data_url:
+            _, b64_podatki = data_url.split(",", 1)
+            st.session_state.stevec_kamere += 1
+            ime_slike = f"Kamera_listic_{st.session_state.stevec_kamere}.jpg"
+            st.session_state.kamera_slike[ime_slike] = base64.b64decode(b64_podatki)
+            st.session_state.izbrani_listic_select = ime_slike
+
+    if st.session_state.kamera_slike:
+        if st.button("🗑️ Počisti slike iz kamere"):
+            st.session_state.kamera_slike = {}
+            st.rerun()
 
 vsi_listici = {}
 if nalozene_datoteke:
     for dat in nalozene_datoteke:
         vsi_listici[dat.name] = dat
-if slika_kamere:
-    vsi_listici["Kamera_listic.jpg"] = slika_kamere
+for ime_k, bajti_k in st.session_state.kamera_slike.items():
+    vsi_listici[ime_k] = io.BytesIO(bajti_k)
 
 if vsi_listici:
-    izbrano_ime = st.selectbox("Izberi listič za analizo", list(vsi_listici.keys()))
+    imena_listicev = list(vsi_listici.keys())
+    if (
+        "izbrani_listic_select" in st.session_state
+        and st.session_state.izbrani_listic_select not in vsi_listici
+    ):
+        st.session_state.izbrani_listic_select = imena_listicev[0]
+
+    izbrano_ime = st.selectbox(
+        "Izberi listič za analizo", imena_listicev, key="izbrani_listic_select"
+    )
     izbrana_datoteka = vsi_listici[izbrano_ime]
     osnovno_ime = os.path.splitext(izbrano_ime)[0]
 
