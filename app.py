@@ -19,7 +19,7 @@ from slike import (
     obarvaj_kapljice_rdece,
 )
 
-# --- KOMPONENTA ZA ODPIRANJE PRIVZETE KAMERE TELEFONA S POTRDITVIJO SPREJEMA ---
+# --- KOMPONENTA ZA ODPIRANJE PRIVZETE KAMERE TELEFONA ---
 KAMERA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_kamera_komponenta")
 os.makedirs(KAMERA_MAPA, exist_ok=True)
 KAMERA_INDEX_POT = os.path.join(KAMERA_MAPA, "index.html")
@@ -30,30 +30,24 @@ HTML_KODA_KAMERE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <style>
   body { margin: 0; padding: 4px 0; font-family: sans-serif; background: transparent; }
-  .cam-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+  .cam-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
   .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .cam-btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     background: #ff4b4b; color: #ffffff; border: none; border-radius: 8px;
-    padding: 12px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15); user-select: none;
+    padding: 11px 20px; font-size: 15px; font-weight: 600; cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.12); user-select: none;
   }
   .cam-btn:hover { background: #e63e3e; }
   .cam-btn:active { transform: scale(0.98); }
   .retry-btn {
     display: none; align-items: center; justify-content: center; gap: 6px;
-    background: #00c853; color: #ffffff; border: none; border-radius: 8px;
-    padding: 12px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: #4b5563; color: #ffffff; border: none; border-radius: 8px;
+    padding: 11px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
   }
-  .retry-btn:hover { background: #00b248; }
-  .preview-row { display: none; align-items: center; gap: 10px; }
-  .preview-img {
-    width: 72px; height: 72px; object-fit: cover; border-radius: 6px;
-    border: 1px solid #d0d7de; background: #111;
-  }
-  .status { font-size: 13px; color: #7a828e; line-height: 1.4; }
-  .status.ok { color: #00a844; font-weight: 600; }
-  .status.err { color: #d32f2f; font-weight: 600; }
+  .retry-btn:hover { background: #374151; }
+  .status { font-size: 12px; color: #7a828e; line-height: 1.4; }
+  .status.err { color: #d32f2f; }
 </style>
 </head>
 <body>
@@ -61,21 +55,15 @@ HTML_KODA_KAMERE = """<!DOCTYPE html>
   <div class="btn-row">
     <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
     <label for="camInput" class="cam-btn">📷 Odpri kamero telefona</label>
-    <button id="retryBtn" type="button" class="retry-btn">📤 Pošlji sliko v analizo</button>
+    <button id="retryBtn" type="button" class="retry-btn">Poskusi znova poslati</button>
   </div>
-  <div id="previewRow" class="preview-row">
-    <img id="previewImg" class="preview-img" alt="Predogled">
-    <div id="status" class="status"></div>
-  </div>
-  <div id="hint" class="status">Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).</div>
+  <div id="status" class="status">Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).</div>
 </div>
 <script>
 const camInput = document.getElementById("camInput");
 const retryBtn = document.getElementById("retryBtn");
-const previewRow = document.getElementById("previewRow");
-const previewImg = document.getElementById("previewImg");
 const statusEl = document.getElementById("status");
-const hintEl = document.getElementById("hint");
+const PRIVZET_NAPIS = "Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).";
 
 let pendingPayload = null;
 let retryTimer = null;
@@ -87,7 +75,7 @@ function sendMessage(type, data) {
 }
 
 function updateHeight() {
-  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 12 });
+  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 8 });
 }
 
 function ustaviPonavljanje() {
@@ -131,10 +119,9 @@ function posljiTrenutno(rocno) {
   });
 
   statusEl.className = "status";
-  statusEl.textContent =
-    "Pošiljam fotografijo (" + pendingPayload.info + ") – poskus " + pendingPayload.attempt + " ...";
+  statusEl.textContent = "Nalagam fotografijo ...";
 
-  if (pendingPayload.attempt >= 2) {
+  if (pendingPayload.attempt >= 3) {
     retryBtn.style.display = "inline-flex";
   }
   updateHeight();
@@ -146,7 +133,7 @@ function posljiTrenutno(rocno) {
         posljiTrenutno(false);
       } else if (pendingPayload && lastAckTs !== pendingPayload.ts) {
         statusEl.className = "status err";
-        statusEl.textContent = "Povezava se je med slikanjem prekinila. Tapni zeleni gumb za pošiljanje.";
+        statusEl.textContent = "Povezava se je med slikanjem prekinila. Tapni »Poskusi znova poslati«.";
         retryBtn.style.display = "inline-flex";
         updateHeight();
       }
@@ -165,8 +152,6 @@ camInput.addEventListener("change", (e) => {
   if (!file) return;
 
   ustaviPonavljanje();
-  hintEl.style.display = "none";
-  previewRow.style.display = "flex";
   retryBtn.style.display = "none";
   statusEl.className = "status";
   statusEl.textContent = "Pripravljam fotografijo ...";
@@ -186,19 +171,14 @@ camInput.addEventListener("change", (e) => {
       }
       URL.revokeObjectURL(objectUrl);
 
-      const velKB = Math.round((res.dataUrl.length * 3) / 4 / 1024);
-      previewImg.src = res.dataUrl;
-
       pendingPayload = {
         name: file.name || "Kamera_listic.jpg",
         data_url: res.dataUrl,
         ts: Date.now(),
-        attempt: 0,
-        info: res.nw + "×" + res.nh + " px, " + velKB + " KB"
+        attempt: 0
       };
 
       camInput.value = "";
-      // Kratek zamik (500 ms), da mobilni brskalnik po vrnitvi iz kamere znova vzpostavi povezavo
       retryTimer = setTimeout(() => posljiTrenutno(false), 500);
       updateHeight();
     } catch (err) {
@@ -213,7 +193,7 @@ camInput.addEventListener("change", (e) => {
   img.onerror = () => {
     URL.revokeObjectURL(objectUrl);
     statusEl.className = "status err";
-    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova ali uporabi zavihek Naloži slike.";
+    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova.";
     camInput.value = "";
     updateHeight();
   };
@@ -236,8 +216,8 @@ window.addEventListener("message", (event) => {
     if (pendingPayload && lastAckTs === pendingPayload.ts) {
       ustaviPonavljanje();
       retryBtn.style.display = "none";
-      statusEl.className = "status ok";
-      statusEl.textContent = "✅ Fotografija sprejeta (" + pendingPayload.info + "). Lahko slikaš naslednji listič.";
+      statusEl.className = "status";
+      statusEl.textContent = PRIVZET_NAPIS;
     }
   }
   updateHeight();
@@ -339,13 +319,6 @@ with zav2:
             ime_slike = f"Kamera_listic_{st.session_state.stevec_kamere}.jpg"
             st.session_state.kamera_slike[ime_slike] = base64.b64decode(b64_podatki)
             st.session_state.izbrani_listic_select = ime_slike
-            st.rerun()
-
-    if st.session_state.kamera_slike:
-        st.caption(f"Zajetih fotografij iz kamere: **{len(st.session_state.kamera_slike)}**")
-        if st.button("🗑️ Počisti slike iz kamere"):
-            st.session_state.kamera_slike = {}
-            st.session_state.zadnji_kamera_ts = None
             st.rerun()
 
 vsi_listici = {}

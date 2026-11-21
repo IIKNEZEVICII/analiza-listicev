@@ -14,6 +14,7 @@ STANDARDNA_DOLZINA_MM = 76.0
 STANDARDNA_SIRINA_MM = 22.0
 STANDARDNA_POVRSINA_CM2 = (STANDARDNA_DOLZINA_MM * STANDARDNA_SIRINA_MM) / 100.0
 MIN_PREMER_STANDARD_UM = 50.0
+PRIVZETA_OBCUTLJIVOST_STANDARD = 75.0
 
 # Ohranjanje ločljivosti med 20 px/mm (1520 px) in 40 px/mm (3040 px),
 # da se drobne kapljice velikosti 50 μm pri skenih ne izgubijo s pomanjševanjem.
@@ -62,7 +63,7 @@ def pridobi_izoliran_rgba(slika_rgb):
 
 
 # =====================================================================
-# INTERAKTIVNA KOMPONENTA ZA ROČNI IZREZ (S 5x POVEČAVO)
+# INTERAKTIVNA KOMPONENTA ZA ROČNI IZREZ (ODZIVNA + PLAVAJOČA LUPA)
 # =====================================================================
 
 KOMPONENTA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_izrez_komponenta")
@@ -74,17 +75,24 @@ HTML_KODA_IZREZA = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  body { margin: 0; padding: 0; font-family: sans-serif; background: transparent; user-select: none; }
-  .wrapper { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
-  .canvas-box { position: relative; border-radius: 8px; overflow: hidden; border: 1px solid #d0d7de; background: #111; }
-  .zoom-box {
-    display: flex; flex-direction: column; align-items: center;
-    background: #1e1e1e; padding: 10px; border-radius: 8px; border: 1px solid #d0d7de; color: #eee;
-    min-width: 196px;
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0; font-family: sans-serif;
+    background: transparent; user-select: none; overflow: hidden;
   }
-  .zoom-title { font-size: 12px; margin-bottom: 6px; color: #ddd; font-weight: 600; }
-  .zoom-hint { font-size: 11px; margin-top: 7px; color: #9aa0a6; text-align: center; line-height: 1.35; }
-  canvas { display: block; cursor: crosshair; outline: none; }
+  .wrapper {
+    display: flex; flex-direction: column; align-items: flex-start;
+    width: 100%; gap: 6px;
+  }
+  .canvas-box {
+    position: relative; border-radius: 8px; overflow: hidden;
+    border: 1px solid #d0d7de; background: #111; max-width: 100%;
+  }
+  canvas {
+    display: block; cursor: crosshair; outline: none;
+    touch-action: none; -webkit-touch-callout: none;
+  }
+  .hint { font-size: 12px; color: #7a828e; line-height: 1.35; }
 </style>
 </head>
 <body>
@@ -92,19 +100,12 @@ HTML_KODA_IZREZA = """<!DOCTYPE html>
   <div class="canvas-box">
     <canvas id="mainCanvas" tabindex="0"></canvas>
   </div>
-  <div class="zoom-box">
-    <div class="zoom-title" id="zoomLabel">Izberi oglišče za povečavo</div>
-    <canvas id="zoomCanvas" width="190" height="190"></canvas>
-    <div class="zoom-hint">Povleci oglišče ali sredino roba.<br>Puščice na tipkovnici: fin premik.</div>
-  </div>
+  <div class="hint">Povleci oglišče ali sredino roba – med držanjem se prikaže lupa.</div>
 </div>
 
 <script>
 const mainCanvas = document.getElementById("mainCanvas");
 const ctx = mainCanvas.getContext("2d");
-const zoomCanvas = document.getElementById("zoomCanvas");
-const zctx = zoomCanvas.getContext("2d");
-const zoomLabel = document.getElementById("zoomLabel");
 
 let img = new Image();
 let currentB64 = "";
@@ -115,30 +116,155 @@ let dragMode = null;
 let draggingIdx = -1;
 let dragStartPos = [0, 0];
 let dragStartCorners = null;
-const imenaOglisc = ["Zgoraj levo", "Zgoraj desno", "Spodaj desno", "Spodaj levo"];
+let isTouchDrag = false;
+let keyLoupeTimer = null;
+let showKeyLoupe = false;
+let displayW = 320;
+let displayH = 240;
 
 function sendMessage(type, data) {
   window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
 }
 
 function updateHeight() {
-  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 12 });
+  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 10 });
 }
 
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
+function resizeCanvas() {
+  if (!img.naturalWidth) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const availW = Math.max(220, Math.min(640, window.innerWidth - 4));
+  const maxH = Math.round(Math.min(620, Math.max(400, window.innerWidth * 1.45)));
+  const scale = Math.min(availW / img.naturalWidth, maxH / img.naturalHeight, 1);
+
+  displayW = Math.max(120, Math.round(img.naturalWidth * scale));
+  displayH = Math.max(120, Math.round(img.naturalHeight * scale));
+
+  mainCanvas.style.width = displayW + "px";
+  mainCanvas.style.height = displayH + "px";
+  mainCanvas.width = Math.round(displayW * dpr);
+  mainCanvas.height = Math.round(displayH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  draw();
+  updateHeight();
+}
+
+function drawLoupe(fx, fy) {
+  const R = Math.round(Math.min(72, Math.max(48, displayW * 0.19)));
+  const px = fx * displayW;
+  const py = fy * displayH;
+  const offset = R + (isTouchDrag ? 44 : 22);
+
+  let lx = px;
+  let ly = py - offset;
+
+  if (ly - R < 6) {
+    ly = py + offset;
+  }
+  ly = Math.max(R + 6, Math.min(displayH - R - 6, ly));
+  lx = Math.max(R + 6, Math.min(displayW - R - 6, lx));
+
+  // Če bi lupa na nizki sliki še vedno prekrivala prst, jo zamaknemo v stran
+  if (Math.hypot(lx - px, ly - py) < R + 12) {
+    const shiftX = R + (isTouchDrag ? 40 : 20);
+    if (px + shiftX + R <= displayW - 6) lx = px + shiftX;
+    else if (px - shiftX - R >= 6) lx = px - shiftX;
+  }
+
+  // Nežna vodilna črta od točke do lupe
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(lx, ly);
+  ctx.stroke();
+  ctx.restore();
+
+  // Senca pod lupo
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetY = 3;
+  ctx.beginPath();
+  ctx.arc(lx, ly, R, 0, Math.PI * 2);
+  ctx.fillStyle = "#111";
+  ctx.fill();
+  ctx.restore();
+
+  // Vsebina lupe (4.5x povečava okoli točke/roba)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(lx, ly, R, 0, Math.PI * 2);
+  ctx.clip();
+
+  ctx.fillStyle = "#111";
+  ctx.fillRect(lx - R, ly - R, 2 * R, 2 * R);
+
+  const zoomFactor = 4.5;
+  const srcW = (2 * R / zoomFactor) * (img.naturalWidth / displayW);
+  const srcH = (2 * R / zoomFactor) * (img.naturalHeight / displayH);
+  const srcX = fx * img.naturalWidth - srcW / 2;
+  const srcY = fy * img.naturalHeight - srcH / 2;
+
+  ctx.drawImage(img, srcX, srcY, srcW, srcH, lx - R, ly - R, 2 * R, 2 * R);
+
+  // Zelena robna črta izreza v povečavi
+  ctx.strokeStyle = "#00e676";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  corners.forEach((pt, i) => {
+    const ux = lx + (pt[0] - fx) * displayW * zoomFactor;
+    const uy = ly + (pt[1] - fy) * displayH * zoomFactor;
+    if (i === 0) ctx.moveTo(ux, uy);
+    else ctx.lineTo(ux, uy);
+  });
+  ctx.closePath();
+  ctx.stroke();
+
+  // Rdeči križec v središču lupe
+  ctx.strokeStyle = "#ff1744";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(lx - 13, ly);
+  ctx.lineTo(lx + 13, ly);
+  ctx.moveTo(lx, ly - 13);
+  ctx.lineTo(lx, ly + 13);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // Zunanji obroč lupe
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(lx, ly, R, 0, Math.PI * 2);
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "#00e676";
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(lx, ly, R - 2, 0, Math.PI * 2);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.stroke();
+  ctx.restore();
+}
+
 function draw() {
-  if (!img.width) return;
-  ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
-  ctx.drawImage(img, 0, 0, mainCanvas.width, mainCanvas.height);
+  if (!img.naturalWidth) return;
+  ctx.clearRect(0, 0, displayW, displayH);
+  ctx.drawImage(img, 0, 0, displayW, displayH);
 
   ctx.save();
   ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
   ctx.beginPath();
-  ctx.rect(0, 0, mainCanvas.width, mainCanvas.height);
-  ctx.moveTo(corners[0][0] * mainCanvas.width, corners[0][1] * mainCanvas.height);
+  ctx.rect(0, 0, displayW, displayH);
+  ctx.moveTo(corners[0][0] * displayW, corners[0][1] * displayH);
   for (let i = 1; i < 4; i++) {
-    ctx.lineTo(corners[i][0] * mainCanvas.width, corners[i][1] * mainCanvas.height);
+    ctx.lineTo(corners[i][0] * displayW, corners[i][1] * displayH);
   }
   ctx.closePath();
   ctx.fill("evenodd");
@@ -148,21 +274,22 @@ function draw() {
   ctx.lineWidth = 2;
   ctx.beginPath();
   corners.forEach((pt, i) => {
-    const x = pt[0] * mainCanvas.width;
-    const y = pt[1] * mainCanvas.height;
+    const x = pt[0] * displayW;
+    const y = pt[1] * displayH;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
   ctx.closePath();
   ctx.stroke();
 
+  // Ročke na sredini vsakega roba
   for (let i = 0; i < 4; i++) {
     const p1 = corners[i];
     const p2 = corners[(i + 1) % 4];
-    const mx = 0.5 * (p1[0] + p2[0]) * mainCanvas.width;
-    const my = 0.5 * (p1[1] + p2[1]) * mainCanvas.height;
+    const mx = 0.5 * (p1[0] + p2[0]) * displayW;
+    const my = 0.5 * (p1[1] + p2[1]) * displayH;
     ctx.beginPath();
-    ctx.rect(mx - 4.5, my - 4.5, 9, 9);
+    ctx.rect(mx - 5, my - 5, 10, 10);
     ctx.fillStyle = (dragMode === "edge" && draggingIdx === i) ? "#ffab00" : "#ffffff";
     ctx.fill();
     ctx.lineWidth = 1.5;
@@ -170,9 +297,10 @@ function draw() {
     ctx.stroke();
   }
 
+  // Oglišča
   corners.forEach((pt, i) => {
-    const x = pt[0] * mainCanvas.width;
-    const y = pt[1] * mainCanvas.height;
+    const x = pt[0] * displayW;
+    const y = pt[1] * displayH;
     ctx.beginPath();
     ctx.arc(x, y, i === activeIdx ? 8 : 6.5, 0, Math.PI * 2);
     ctx.fillStyle = i === activeIdx ? "#ff1744" : "#00e676";
@@ -182,80 +310,44 @@ function draw() {
     ctx.stroke();
   });
 
-  drawZoom();
-}
-
-function drawZoom() {
-  if (!img.width || activeIdx < 0) return;
-  const zw = zoomCanvas.width;
-  const zh = zoomCanvas.height;
-  zctx.clearRect(0, 0, zw, zh);
-
-  const zoomFactor = 5.0;
-  const srcW = (zw / zoomFactor) * (img.naturalWidth / mainCanvas.width);
-  const srcH = (zh / zoomFactor) * (img.naturalHeight / mainCanvas.height);
-
-  const cx = corners[activeIdx][0] * img.naturalWidth;
-  const cy = corners[activeIdx][1] * img.naturalHeight;
-
-  zctx.fillStyle = "#111";
-  zctx.fillRect(0, 0, zw, zh);
-
-  zctx.drawImage(
-    img,
-    cx - srcW / 2, cy - srcH / 2, srcW, srcH,
-    0, 0, zw, zh
-  );
-
-  const prevIdx = (activeIdx + 3) % 4;
-  const nextIdx = (activeIdx + 1) % 4;
-  const scaleX = mainCanvas.width * zoomFactor;
-  const scaleY = mainCanvas.height * zoomFactor;
-
-  zctx.strokeStyle = "#00e676";
-  zctx.lineWidth = 2;
-  zctx.beginPath();
-  [prevIdx, nextIdx].forEach(idx => {
-    const dx = (corners[idx][0] - corners[activeIdx][0]) * scaleX;
-    const dy = (corners[idx][1] - corners[activeIdx][1]) * scaleY;
-    zctx.moveTo(zw / 2, zh / 2);
-    zctx.lineTo(zw / 2 + dx, zh / 2 + dy);
-  });
-  zctx.stroke();
-
-  zctx.strokeStyle = "#ff1744";
-  zctx.lineWidth = 1.5;
-  zctx.beginPath();
-  zctx.moveTo(zw / 2 - 14, zh / 2);
-  zctx.lineTo(zw / 2 + 14, zh / 2);
-  zctx.moveTo(zw / 2, zh / 2 - 14);
-  zctx.lineTo(zw / 2, zh / 2 + 14);
-  zctx.stroke();
-
-  zoomLabel.textContent = "5× povečava: " + imenaOglisc[activeIdx];
+  // Plavajoča lupa se prikaže samo med držanjem oglišča/roba (ali pri finem premiku s puščicami)
+  if (draggingIdx >= 0) {
+    if (dragMode === "corner") {
+      drawLoupe(corners[draggingIdx][0], corners[draggingIdx][1]);
+    } else if (dragMode === "edge") {
+      const p1 = corners[draggingIdx];
+      const p2 = corners[(draggingIdx + 1) % 4];
+      drawLoupe(0.5 * (p1[0] + p2[0]), 0.5 * (p1[1] + p2[1]));
+    }
+  } else if (showKeyLoupe && activeIdx >= 0) {
+    drawLoupe(corners[activeIdx][0], corners[activeIdx][1]);
+  }
 }
 
 function getPos(e) {
   const rect = mainCanvas.getBoundingClientRect();
-  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const src = (e.touches && e.touches.length) ? e.touches[0] : e;
   return [
-    clamp01((clientX - rect.left) / mainCanvas.width),
-    clamp01((clientY - rect.top) / mainCanvas.height)
+    clamp01((src.clientX - rect.left) / Math.max(1, rect.width)),
+    clamp01((src.clientY - rect.top) / Math.max(1, rect.height))
   ];
 }
 
 function onDown(e) {
+  isTouchDrag = Boolean(e.touches && e.touches.length);
   const [nx, ny] = getPos(e);
   mainCanvas.focus();
+
+  const hitCorner = isTouchDrag ? 38 : 28;
+  const hitEdge = isTouchDrag ? 32 : 24;
 
   let bestDist = 999;
   let bestIdx = -1;
   corners.forEach((pt, i) => {
-    const d = Math.hypot((pt[0] - nx) * mainCanvas.width, (pt[1] - ny) * mainCanvas.height);
+    const d = Math.hypot((pt[0] - nx) * displayW, (pt[1] - ny) * displayH);
     if (d < bestDist) { bestDist = d; bestIdx = i; }
   });
-  if (bestDist < 28) {
+  if (bestDist < hitCorner) {
     activeIdx = bestIdx;
     dragMode = "corner";
     draggingIdx = bestIdx;
@@ -271,10 +363,10 @@ function onDown(e) {
     const p2 = corners[(i + 1) % 4];
     const mx = 0.5 * (p1[0] + p2[0]);
     const my = 0.5 * (p1[1] + p2[1]);
-    const d = Math.hypot((mx - nx) * mainCanvas.width, (my - ny) * mainCanvas.height);
+    const d = Math.hypot((mx - nx) * displayW, (my - ny) * displayH);
     if (d < bestEdgeDist) { bestEdgeDist = d; bestEdgeIdx = i; }
   }
-  if (bestEdgeDist < 24) {
+  if (bestEdgeDist < hitEdge) {
     dragMode = "edge";
     draggingIdx = bestEdgeIdx;
     dragStartPos = [nx, ny];
@@ -307,6 +399,7 @@ function onUp() {
     draggingIdx = -1;
     dragMode = null;
     dragStartCorners = null;
+    draw();
     sendMessage("streamlit:setComponentValue", { value: corners });
   }
 }
@@ -325,6 +418,10 @@ mainCanvas.addEventListener("keydown", (e) => {
 
   if (moved) {
     e.preventDefault();
+    isTouchDrag = false;
+    showKeyLoupe = true;
+    if (keyLoupeTimer) clearTimeout(keyLoupeTimer);
+    keyLoupeTimer = setTimeout(() => { showKeyLoupe = false; draw(); }, 1100);
     draw();
     sendMessage("streamlit:setComponentValue", { value: corners });
   }
@@ -336,6 +433,8 @@ window.addEventListener("mouseup", onUp);
 mainCanvas.addEventListener("touchstart", onDown, { passive: false });
 window.addEventListener("touchmove", onMove, { passive: false });
 window.addEventListener("touchend", onUp);
+window.addEventListener("touchcancel", onUp);
+window.addEventListener("resize", resizeCanvas);
 
 window.addEventListener("message", (event) => {
   if (!event.data || event.data.type !== "streamlit:render") return;
@@ -353,14 +452,7 @@ window.addEventListener("message", (event) => {
     currentB64 = args.image_b64;
     if (args.reset_version !== undefined) currentResetVersion = args.reset_version;
     if (args.initial_corners) corners = args.initial_corners.map(pt => [pt[0], pt[1]]);
-    img.onload = () => {
-      const maxW = 540;
-      const scale = Math.min(1, maxW / img.naturalWidth);
-      mainCanvas.width = Math.round(img.naturalWidth * scale);
-      mainCanvas.height = Math.round(img.naturalHeight * scale);
-      draw();
-      updateHeight();
-    };
+    img.onload = resizeCanvas;
     img.src = "data:image/jpeg;base64," + currentB64;
   }
 });
@@ -383,7 +475,7 @@ _komponenta_izrez = components.declare_component("stirikotnik_izrez", path=KOMPO
 
 
 # =====================================================================
-# OBREZOVANJE LISTIČA (rembg u2net + ravno obrezovanje sence ob robovih)
+# OBREZOVANJE LISTIČA (rembg u2net + ravno obrezovanje sence + rahlo skrčenje)
 # =====================================================================
 
 def uredi_oglisca(tocke_pravokotnika):
@@ -422,6 +514,38 @@ def _prilagodi_locljivost_listica(poravnan_listic):
 
     metoda = cv2.INTER_AREA if ciljna_sirina < trenutna_sirina else cv2.INTER_LINEAR
     return cv2.resize(poravnan_listic, (ciljna_sirina, nova_visina), interpolation=metoda)
+
+
+def _zamanjsaj_okvir_navznoter(pts1, w_orig, h_orig, delez_krajse=0.015):
+    """
+    Rahlo in enakomerno pomakne vse 4 robove avtomatskega izreza navznoter
+    (~1,5 % krajše stranice oz. ~0,3 mm), da izloči temni rob lističa.
+    """
+    zl, zd, sd, sl = pts1
+    sirina = max(float(np.linalg.norm(sd - sl)), float(np.linalg.norm(zd - zl)), 50.0)
+    visina = max(float(np.linalg.norm(zd - sd)), float(np.linalg.norm(zl - sl)), 50.0)
+    krajsa = min(sirina, visina)
+    odmik = min(max(2.0, krajsa * delez_krajse), krajsa * 0.04)
+
+    pts2 = np.float32([
+        [0.0, 0.0],
+        [sirina - 1.0, 0.0],
+        [sirina - 1.0, visina - 1.0],
+        [0.0, visina - 1.0],
+    ])
+    matrika = cv2.getPerspectiveTransform(pts1, pts2)
+    matrika_inv = np.linalg.inv(matrika)
+
+    notranji = np.float32([
+        [odmik, odmik],
+        [sirina - 1.0 - odmik, odmik],
+        [sirina - 1.0 - odmik, visina - 1.0 - odmik],
+        [odmik, visina - 1.0 - odmik],
+    ])
+    novi = cv2.perspectiveTransform(notranji.reshape(-1, 1, 2), matrika_inv).reshape(4, 2)
+    novi[:, 0] = np.clip(novi[:, 0], 0.0, float(w_orig - 1))
+    novi[:, 1] = np.clip(novi[:, 1], 0.0, float(h_orig - 1))
+    return uredi_oglisca(novi)
 
 
 def _robustna_premica(tocke_a, tocke_b, privzeta_vrednost):
@@ -705,8 +829,8 @@ def _odstrani_senco_na_robovih(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
 
 def poisci_in_izrezi_avtomatsko(slika_rgb):
     """
-    Izolira listič z rembg (u2net), obreže zunanjo senco vzdolž 4 ravnih robov
-    brez poseganja v notranjost lističa ter poravna listič.
+    Izolira listič z rembg (u2net), obreže zunanjo senco vzdolž 4 ravnih robov,
+    rahlo skrči izrez navznoter (brez temnih robov lističa) ter poravna listič.
     Vrne: (koncni_listic_rgba, norm_oglisca, dejanska_maska_izreza)
     """
     h, w = slika_rgb.shape[:2]
@@ -735,10 +859,11 @@ def poisci_in_izrezi_avtomatsko(slika_rgb):
     max_sirina_z = max(int(np.linalg.norm(sd - sl)), int(np.linalg.norm(zd - zl)), 50)
     max_visina_z = max(int(np.linalg.norm(zd - sd)), int(np.linalg.norm(zl - sl)), 50)
 
-    # Odstranimo samo zunanjo senco vzdolž 4 robov
+    # Odstranimo zunanjo senco in vse 4 robove za malenkost pomaknemo navznoter
     pts1 = _odstrani_senco_na_robovih(
         slika_rgb, alpha_kanal, zacetna_maska, pts1_zacetna, max_sirina_z, max_visina_z
     )
+    pts1 = _zamanjsaj_okvir_navznoter(pts1, w, h, delez_krajse=0.015)
     (zgoraj_levo, zgoraj_desno, spodaj_desno, spodaj_levo) = pts1
 
     # Dejanska maska izreza za natančen predogled in čisto analizo kapljic
@@ -884,7 +1009,7 @@ def prikazi_rocni_izrez(slika_rgb, zacetna_oglisca, kljuc, reset_version=0):
 
 
 # =====================================================================
-# ANALIZA KAPLJIC (BREZ LAŽNEGA OBARVANJA VMESNIH PROSTOROV MED KAPLJICAMI)
+# ANALIZA KAPLJIC (USKLAJENI PRAGOVI + BREZ OBARVANJA VMESNIH PROSTOROV)
 # =====================================================================
 
 def _oceni_lokalno_ozadje(kanal, maska_cisto_ozadje, veljavni_indeksi):
@@ -971,6 +1096,7 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     """
     Zazna velike, zelo majhne (nad 50 μm pri standardnih dimenzijah) in tanke podolgovate
     odtise po celotni površini lističa brez lažnega obarvanja rumenega prostora med kapljicami.
+    Standardni način in nestandardni način pri občutljivosti 75 % uporabljata enake pragove.
     """
     if izoliran_rgba.shape[2] == 4:
         slika_rgb = cv2.cvtColor(izoliran_rgba, cv2.COLOR_RGBA2RGB)
@@ -984,7 +1110,7 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     krajsa_stran_px = float(min(w, h))
     faktor_loc = float(np.clip(daljsa_stran_px / float(MIN_STANDARDNA_DOLZINA_PX), 1.0, 2.5))
 
-    # 1. Tesna maska lističa (1 px erozije odreže skrajni mešani robni piksel)
+    # 1. Tesna maska lističa (2 px erozije odreže skrajne temne robne piksle)
     _, maska_surova = cv2.threshold(alpha_kanal, 160, 255, cv2.THRESH_BINARY)
     if cv2.countNonZero(maska_surova) < 100:
         _, maska_surova = cv2.threshold(alpha_kanal, 100, 255, cv2.THRESH_BINARY)
@@ -995,10 +1121,15 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
         maska_surova = np.zeros_like(maska_surova)
         cv2.drawContours(maska_surova, [najvecja_l], -1, 255, thickness=-1)
 
+    eroz_rob = max(2, int(round(2.0 * faktor_loc)))
     okvir = np.zeros_like(maska_surova)
-    okvir[1 : h - 1, 1 : w - 1] = 255
+    if h > 2 * eroz_rob + 4 and w > 2 * eroz_rob + 4:
+        okvir[eroz_rob : h - eroz_rob, eroz_rob : w - eroz_rob] = 255
+    else:
+        okvir[1 : h - 1, 1 : w - 1] = 255
+
     maska_listica = cv2.bitwise_and(
-        cv2.erode(maska_surova, np.ones((3, 3), np.uint8), iterations=1),
+        cv2.erode(maska_surova, np.ones((3, 3), np.uint8), iterations=eroz_rob),
         okvir,
     )
 
@@ -1077,23 +1208,27 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
 
     skala = float(np.clip(np.median(ozadje_oster[ref_maska]) / 200.0, 0.45, 1.25))
 
-    if standardna_dimenzija and obcutljivost is None:
-        # Samodejna kalibracija za zanesljivo zaznavo vseh odtisov nad 50 μm brez šuma papirja
-        prag_jedro = max(3.6 * sigma_sum, 17.5 * skala)
-        prag_drobni = max(2.4 * sigma_sum, 7.5 * skala)
-        prag_dog = max(1.8 * sigma_sum, 4.2 * skala)
-        prag_podolgovati = max(2.1 * sigma_sum, 5.5 * skala)
-        prag_barva_komp = max(1.6 * sigma_barva, 4.0 * skala)
-        prag_barva_drobni = max(1.25 * sigma_barva, 2.8 * skala)
+    # Enotna kalibracija za oba načina: pri občutljivosti 75 % so pragovi identični standardnemu načinu
+    obc_efektivna = (
+        PRIVZETA_OBCUTLJIVOST_STANDARD
+        if (standardna_dimenzija or obcutljivost is None)
+        else float(np.clip(obcutljivost, 1.0, 100.0))
+    )
+    if obc_efektivna >= PRIVZETA_OBCUTLJIVOST_STANDARD:
+        delez = (obc_efektivna - PRIVZETA_OBCUTLJIVOST_STANDARD) / (100.0 - PRIVZETA_OBCUTLJIVOST_STANDARD)
+        f_obc = 1.0 - 0.45 * delez
+        f_sum = 1.0 - 0.25 * delez
     else:
-        obc = float(np.clip(75.0 if obcutljivost is None else obcutljivost, 1, 100))
-        k = (100.0 - obc) / 100.0
-        prag_jedro = max(3.8 * sigma_sum, (11.0 + k * 52.0) * skala)
-        prag_drobni = max(2.5 * sigma_sum, (5.0 + k * 24.0) * skala)
-        prag_dog = max(1.9 * sigma_sum, (2.8 + k * 14.0) * skala)
-        prag_podolgovati = max(2.2 * sigma_sum, (3.8 + k * 16.0) * skala)
-        prag_barva_komp = max(1.6 * sigma_barva, (3.2 + k * 12.0) * skala)
-        prag_barva_drobni = max(1.2 * sigma_barva, (2.2 + k * 8.0) * skala)
+        delez = (PRIVZETA_OBCUTLJIVOST_STANDARD - obc_efektivna) / (PRIVZETA_OBCUTLJIVOST_STANDARD - 1.0)
+        f_obc = 1.0 + 1.80 * delez
+        f_sum = 1.0 + 1.20 * delez
+
+    prag_jedro = max(3.6 * f_sum * sigma_sum, 17.5 * f_obc * skala)
+    prag_drobni = max(2.4 * f_sum * sigma_sum, 7.5 * f_obc * skala)
+    prag_dog = max(1.8 * f_sum * sigma_sum, 4.2 * f_obc * skala)
+    prag_podolgovati = max(2.1 * f_sum * sigma_sum, 5.5 * f_obc * skala)
+    prag_barva_komp = max(1.6 * f_sum * sigma_barva, 4.0 * f_obc * skala)
+    prag_barva_drobni = max(1.25 * f_sum * sigma_barva, 2.8 * f_obc * skala)
 
     # Samo dejansko modro/temno jedro kapljice (nikoli zasenčen rumeni prostor med kapljicami)
     prag_absolutno_moder = max(prag_jedro * 3.0, 95.0 * skala)
@@ -1144,7 +1279,6 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     surova_maska = cv2.bitwise_and(surova_maska, maska_listica)
 
     # Ciljno čiščenje rumenih vmesnih dolin in sedel med dvema bližnjima kapljicama
-    # (ohrani dejanska modra jedra in prave ostre drobne odtise med kapljicama)
     dolina_vel = max(11, int(round(13 * faktor_loc)) | 1)
     dolina_odziv = _smerni_blackhat_za_doline(signal, dolzina=dolina_vel)
     je_oster_vrh = (dog_drobni >= prag_dog * 1.35) & (signal >= gladko_ozko * 1.04)
