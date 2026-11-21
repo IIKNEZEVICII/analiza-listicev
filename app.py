@@ -1,4 +1,3 @@
-import base64
 import io
 import os
 import numpy as np
@@ -18,132 +17,6 @@ from slike import (
     analiziraj_kapljice,
     obarvaj_kapljice_rdece,
 )
-
-# --- KOMPONENTA ZA ODPIRANJE PRIVZETE KAMERE TELEFONA ---
-KAMERA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_kamera_komponenta")
-os.makedirs(KAMERA_MAPA, exist_ok=True)
-KAMERA_INDEX_POT = os.path.join(KAMERA_MAPA, "index.html")
-
-HTML_KODA_KAMERE = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body { margin: 0; padding: 4px 0; font-family: sans-serif; background: transparent; }
-  .cam-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-  .cam-btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    background: #ff4b4b; color: #ffffff; border: none; border-radius: 8px;
-    padding: 12px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15); user-select: none;
-  }
-  .cam-btn:hover { background: #e63e3e; }
-  .cam-btn:active { transform: scale(0.98); }
-  .status { font-size: 12px; color: #7a828e; line-height: 1.4; }
-</style>
-</head>
-<body>
-<div class="cam-wrap">
-  <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
-  <label for="camInput" class="cam-btn">📷 Odpri kamero telefona</label>
-  <div id="status" class="status">Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).</div>
-</div>
-<script>
-const camInput = document.getElementById("camInput");
-const statusEl = document.getElementById("status");
-const MAX_STRANICA = 2600;
-
-function sendMessage(type, data) {
-  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
-}
-
-function updateHeight() {
-  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 10 });
-}
-
-camInput.addEventListener("change", (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-
-  statusEl.textContent = "Pripravljam fotografijo za analizo ...";
-  updateHeight();
-
-  const objectUrl = URL.createObjectURL(file);
-  const img = new Image();
-
-  img.onload = () => {
-    try {
-      const origW = img.naturalWidth || img.width;
-      const origH = img.naturalHeight || img.height;
-      const merilo = Math.min(1, MAX_STRANICA / Math.max(origW, origH));
-      const nw = Math.max(1, Math.round(origW * merilo));
-      const nh = Math.max(1, Math.round(origH * merilo));
-
-      const canvas = document.createElement("canvas");
-      canvas.width = nw;
-      canvas.height = nh;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, nw, nh);
-      URL.revokeObjectURL(objectUrl);
-
-      let dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-      if (dataUrl.length > 1600000) {
-        dataUrl = canvas.toDataURL("image/jpeg", 0.74);
-      }
-
-      const velKB = Math.round((dataUrl.length * 3) / 4 / 1024);
-
-      sendMessage("streamlit:setComponentValue", {
-        dataType: "json",
-        value: {
-          name: file.name || "Kamera_listic.jpg",
-          data_url: dataUrl,
-          ts: Date.now()
-        }
-      });
-
-      statusEl.textContent = "Fotografija poslana (" + nw + "×" + nh + " px, " + velKB + " KB).";
-      camInput.value = "";
-      updateHeight();
-    } catch (err) {
-      URL.revokeObjectURL(objectUrl);
-      statusEl.textContent = "Napaka pri pripravi slike: " + err.message;
-      updateHeight();
-    }
-  };
-
-  img.onerror = () => {
-    URL.revokeObjectURL(objectUrl);
-    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova ali uporabi zavihek Naloži slike.";
-    camInput.value = "";
-    updateHeight();
-  };
-
-  img.src = objectUrl;
-});
-
-window.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "streamlit:render") {
-    updateHeight();
-  }
-});
-
-sendMessage("streamlit:componentReady", { apiVersion: 1 });
-updateHeight();
-</script>
-</body>
-</html>
-"""
-
-_obstojeca_kamera = ""
-if os.path.exists(KAMERA_INDEX_POT):
-    with open(KAMERA_INDEX_POT, "r", encoding="utf-8") as f:
-        _obstojeca_kamera = f.read()
-if _obstojeca_kamera != HTML_KODA_KAMERE:
-    with open(KAMERA_INDEX_POT, "w", encoding="utf-8") as f:
-        f.write(HTML_KODA_KAMERE)
-
-_komponenta_kamera = components.declare_component("nativna_kamera", path=KAMERA_MAPA)
 
 PRIVZETI_PARAMETRI_LETA = {
     "Višina leta (m)": 3.0,
@@ -165,8 +38,8 @@ if "reset_verzija_izreza" not in st.session_state:
     st.session_state.reset_verzija_izreza = {}
 if "kamera_slike" not in st.session_state:
     st.session_state.kamera_slike = {}
-if "zadnji_kamera_ts" not in st.session_state:
-    st.session_state.zadnji_kamera_ts = None
+if "zadnji_kamera_id" not in st.session_state:
+    st.session_state.zadnji_kamera_id = None
 if "stevec_kamere" not in st.session_state:
     st.session_state.stevec_kamere = 0
 
@@ -205,27 +78,72 @@ with zav1:
         type=["jpg", "jpeg", "png", "bmp", "webp"],
         accept_multiple_files=True,
         label_visibility="collapsed",
+        key="nalagalnik_galerija",
     )
 with zav2:
-    slika_kamere_podatki = _komponenta_kamera(key="nativna_kamera")
-    if (
-        isinstance(slika_kamere_podatki, dict)
-        and slika_kamere_podatki.get("ts") != st.session_state.zadnji_kamera_ts
-        and slika_kamere_podatki.get("data_url")
-    ):
-        st.session_state.zadnji_kamera_ts = slika_kamere_podatki["ts"]
-        data_url = slika_kamere_podatki["data_url"]
-        if "," in data_url:
-            _, b64_podatki = data_url.split(",", 1)
+    st.markdown('<span id="kamera-uploader-oznaka"></span>', unsafe_allow_html=True)
+    slika_kamere = st.file_uploader(
+        "Slikaj listič s kamero telefona",
+        type=["jpg", "jpeg", "png", "bmp", "webp"],
+        accept_multiple_files=False,
+        key="nalagalnik_kamera",
+    )
+    # Skript doda atribut capture="environment" samo nalagalniku v zavihku Kamera,
+    # da telefon neposredno odpre privzeto kamero in sliko zanesljivo prenese prek HTTP.
+    components.html(
+        """
+        <script>
+        (function() {
+          try {
+            const doc = window.parent.document;
+            function nastaviKamero() {
+              const oznaka = doc.getElementById("kamera-uploader-oznaka");
+              if (!oznaka) return;
+              const panel = oznaka.closest('[role="tabpanel"]') || oznaka.closest('[data-testid="stVerticalBlock"]');
+              if (!panel) return;
+              const vhod = panel.querySelector('input[type="file"]');
+              if (vhod) {
+                if (vhod.getAttribute("accept") !== "image/*") {
+                  vhod.setAttribute("accept", "image/*");
+                }
+                if (vhod.getAttribute("capture") !== "environment") {
+                  vhod.setAttribute("capture", "environment");
+                }
+                if (vhod.hasAttribute("multiple")) {
+                  vhod.removeAttribute("multiple");
+                }
+              }
+            }
+            nastaviKamero();
+            if (window.parent.__kameraObserver) {
+              window.parent.__kameraObserver.disconnect();
+            }
+            const obs = new MutationObserver(nastaviKamero);
+            obs.observe(doc.body, { childList: true, subtree: true });
+            window.parent.__kameraObserver = obs;
+          } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+    if slika_kamere is not None:
+        trenutni_id = getattr(
+            slika_kamere, "file_id", f"{slika_kamere.name}_{slika_kamere.size}"
+        )
+        if trenutni_id != st.session_state.zadnji_kamera_id:
+            st.session_state.zadnji_kamera_id = trenutni_id
             st.session_state.stevec_kamere += 1
             ime_slike = f"Kamera_listic_{st.session_state.stevec_kamere}.jpg"
-            st.session_state.kamera_slike[ime_slike] = base64.b64decode(b64_podatki)
+            st.session_state.kamera_slike[ime_slike] = slika_kamere.getvalue()
             st.session_state.izbrani_listic_select = ime_slike
 
     if st.session_state.kamera_slike:
         st.caption(f"Zajetih fotografij iz kamere: **{len(st.session_state.kamera_slike)}**")
         if st.button("🗑️ Počisti slike iz kamere"):
             st.session_state.kamera_slike = {}
+            st.session_state.zadnji_kamera_id = None
             st.rerun()
 
 vsi_listici = {}
