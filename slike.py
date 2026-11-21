@@ -216,7 +216,6 @@ function drawLoupe(fx, fy) {
     else if (px - shiftX - R >= 4) lx = px - shiftX;
   }
 
-  // Vodilna črta od pritisnjene točke na robu do lupe
   ctx.save();
   ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
   ctx.lineWidth = 1.5;
@@ -227,7 +226,6 @@ function drawLoupe(fx, fy) {
   ctx.stroke();
   ctx.restore();
 
-  // Senca pod lupo
   ctx.save();
   ctx.shadowColor = "rgba(0, 0, 0, 0.60)";
   ctx.shadowBlur = 12;
@@ -238,7 +236,6 @@ function drawLoupe(fx, fy) {
   ctx.fill();
   ctx.restore();
 
-  // Povečan izsek okoli pritisnjenega oglišča / roba (4.5x)
   ctx.save();
   ctx.beginPath();
   ctx.arc(lx, ly, R, 0, Math.PI * 2);
@@ -255,7 +252,6 @@ function drawLoupe(fx, fy) {
 
   ctx.drawImage(img, srcX, srcY, srcW, srcH, lx - R, ly - R, 2 * R, 2 * R);
 
-  // Zelena robna črta v povečavi
   ctx.strokeStyle = "#00e676";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -268,7 +264,6 @@ function drawLoupe(fx, fy) {
   ctx.closePath();
   ctx.stroke();
 
-  // Rdeči križec točno na robu / oglišču
   ctx.strokeStyle = "#ff1744";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -280,7 +275,6 @@ function drawLoupe(fx, fy) {
 
   ctx.restore();
 
-  // Obroč lupe
   ctx.save();
   ctx.beginPath();
   ctx.arc(lx, ly, R, 0, Math.PI * 2);
@@ -302,7 +296,6 @@ function draw() {
   ctx.fillRect(0, 0, displayW, displayH);
   ctx.drawImage(img, padX, padY, imgW, imgH);
 
-  // Zatemnitev zunaj izbranega štirikotnika
   ctx.save();
   ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
   ctx.beginPath();
@@ -317,7 +310,6 @@ function draw() {
   ctx.fill("evenodd");
   ctx.restore();
 
-  // Zelena meja izreza
   ctx.strokeStyle = "#00e676";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -329,7 +321,6 @@ function draw() {
   ctx.closePath();
   ctx.stroke();
 
-  // Ročke na sredini robov
   for (let i = 0; i < 4; i++) {
     const p1 = corners[i];
     const p2 = corners[(i + 1) % 4];
@@ -343,7 +334,6 @@ function draw() {
     ctx.stroke();
   }
 
-  // 4 oglišča
   corners.forEach((pt, i) => {
     const [x, y] = normToCanvas(pt[0], pt[1]);
     const r = (i === activeIdx) ? 8.5 : 7;
@@ -356,7 +346,6 @@ function draw() {
     ctx.stroke();
   });
 
-  // Lupa se pojavi izključno na pritisnjenem oglišču ali robu med držanjem
   if (draggingIdx >= 0) {
     if (dragMode === "corner") {
       drawLoupe(corners[draggingIdx][0], corners[draggingIdx][1]);
@@ -397,7 +386,6 @@ function onDown(e) {
   const hitCorner = isTouchDrag ? 36 : 24;
   const hitEdge = isTouchDrag ? 26 : 16;
 
-  // 1. Preverimo dotik oglišča
   let bestDist = 9999;
   let bestIdx = -1;
   corners.forEach((pt, i) => {
@@ -414,7 +402,6 @@ function onDown(e) {
     return;
   }
 
-  // 2. Preverimo dotik kjerkoli vzdolž kateregakoli roba
   let bestEdgeDist = 9999;
   let bestEdgeIdx = -1;
   let bestEdgeT = 0.5;
@@ -592,10 +579,8 @@ def _prilagodi_locljivost_listica(poravnan_listic):
 
 def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_sirina, max_visina):
     """
-    Odstrani zunanjo kontaktno in sivo senco neposredno po dejanski konturi lističa
-    (luščenje sence od zunaj navznoter v ozkem robnem pasu), brez ravnega rezanja ukrivljenih
-    ali perspektivno nagnjenih robov in brez poseganja v notranjost ali modre kapljice.
-    Vrne očiščeno masko v koordinatah izvirne slike.
+    Odstrani zunanjo kontaktno in sivo senco neposredno po dejanski konturi lističa,
+    zapolni morebitne zareze od temnih robnih kapljic in vrne očiščeno masko v koordinatah izvirne slike.
     """
     if max_sirina < 40 or max_visina < 40:
         return zacetna_maska
@@ -609,16 +594,27 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
     matrika = cv2.getPerspectiveTransform(pts1, pts2)
 
     poravnan_rgb = cv2.warpPerspective(
-        slika_rgb, matrika, (max_sirina, max_visina),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+        slika_rgb,
+        matrika,
+        (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
     )
     poravnan_alpha = cv2.warpPerspective(
-        alpha_kanal, matrika, (max_sirina, max_visina),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        alpha_kanal,
+        matrika,
+        (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
     poravnan_maska = cv2.warpPerspective(
-        zacetna_maska, matrika, (max_sirina, max_visina),
-        flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        zacetna_maska,
+        matrika,
+        (max_sirina, max_visina),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
 
     dist_od_roba = cv2.distanceTransform((poravnan_maska > 127).astype(np.uint8), cv2.DIST_L2, 5)
@@ -729,10 +725,12 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
 
     cista_warp = np.where(~zunanja_senca, 255, 0).astype(np.uint8)
 
-    # Rahlo glajenje zapolni morebitne drobne zareze na robu, a popolnoma ohrani ukrivljeno konturo
-   k_glad = max(15, min(61, int(round(min(max_sirina, max_visina) * 0.14)) | 1))
+    # Morfološko zapiranje z obrobo zapolni vbočene zareze od robnih kapljic, ne da bi vrnilo senco
+    k_glad = max(15, min(61, int(round(min(max_sirina, max_visina) * 0.14)) | 1))
     jedro_glad = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_glad, k_glad))
-    cista_pad = cv2.copyMakeBorder(cista_warp, k_glad, k_glad, k_glad, k_glad, cv2.BORDER_CONSTANT, value=0)
+    cista_pad = cv2.copyMakeBorder(
+        cista_warp, k_glad, k_glad, k_glad, k_glad, cv2.BORDER_CONSTANT, value=0
+    )
     cista_pad = cv2.morphologyEx(cista_pad, cv2.MORPH_CLOSE, jedro_glad)
     cista_warp = cista_pad[k_glad:-k_glad, k_glad:-k_glad]
 
@@ -749,8 +747,12 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
 
     matrika_inv = np.linalg.inv(matrika)
     cista_orig = cv2.warpPerspective(
-        cista_warp, matrika_inv, (w_orig, h_orig),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        cista_warp,
+        matrika_inv,
+        (w_orig, h_orig),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
     _, cista_orig = cv2.threshold(cista_orig, 127, 255, cv2.THRESH_BINARY)
     if cv2.countNonZero(cista_orig) < 100:
@@ -833,12 +835,19 @@ def poisci_in_izrezi_avtomatsko(slika_rgb):
 
     # Barve beremo iz čiste izvirne RGB slike (brez črnega ozadja rembg), obliko pa iz dejanske konture
     poravnan_rgb = cv2.warpPerspective(
-        slika_rgb, matrika, (max_sirina, max_visina),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+        slika_rgb,
+        matrika,
+        (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
     )
     poravnan_alpha = cv2.warpPerspective(
-        dejanska_maska, matrika, (max_sirina, max_visina),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        dejanska_maska,
+        matrika,
+        (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
     _, poravnan_alpha = cv2.threshold(poravnan_alpha, 127, 255, cv2.THRESH_BINARY)
     poravnan_listic = np.concatenate([poravnan_rgb, poravnan_alpha[:, :, None]], axis=2)
