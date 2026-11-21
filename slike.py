@@ -730,10 +730,11 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
     cista_warp = np.where(~zunanja_senca, 255, 0).astype(np.uint8)
 
     # Rahlo glajenje zapolni morebitne drobne zareze na robu, a popolnoma ohrani ukrivljeno konturo
-    k_glad = max(3, min(9, int(round(min(max_sirina, max_visina) * 0.02)) | 1))
+   k_glad = max(15, min(61, int(round(min(max_sirina, max_visina) * 0.14)) | 1))
     jedro_glad = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_glad, k_glad))
-    cista_warp = cv2.morphologyEx(cista_warp, cv2.MORPH_CLOSE, jedro_glad)
-    cista_warp = cv2.bitwise_and(cista_warp, poravnan_maska)
+    cista_pad = cv2.copyMakeBorder(cista_warp, k_glad, k_glad, k_glad, k_glad, cv2.BORDER_CONSTANT, value=0)
+    cista_pad = cv2.morphologyEx(cista_pad, cv2.MORPH_CLOSE, jedro_glad)
+    cista_warp = cista_pad[k_glad:-k_glad, k_glad:-k_glad]
 
     konture_c, _ = cv2.findContours(cista_warp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not konture_c:
@@ -752,7 +753,6 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
         flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
     _, cista_orig = cv2.threshold(cista_orig, 127, 255, cv2.THRESH_BINARY)
-    cista_orig = cv2.bitwise_and(cista_orig, zacetna_maska)
     if cv2.countNonZero(cista_orig) < 100:
         return zacetna_maska
     return cista_orig
