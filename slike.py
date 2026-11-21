@@ -549,7 +549,7 @@ _komponenta_izrez = components.declare_component("stirikotnik_izrez_v2", path=KO
 
 
 # =====================================================================
-# OBREZOVANJE LISTIČA (rembg u2net + senca + minimalni notranji odrez roba)
+# OBREZOVANJE LISTIČA (DEJANSKA KONTURA + ODSTRANJEVANJE SENCE + MIN. ODREZ)
 # =====================================================================
 
 def uredi_oglisca(tocke_pravokotnika):
@@ -590,163 +590,15 @@ def _prilagodi_locljivost_listica(poravnan_listic):
     return cv2.resize(poravnan_listic, (ciljna_sirina, nova_visina), interpolation=metoda)
 
 
-def _zamanjsaj_okvir_navznoter(pts1, w_orig, h_orig, delez_krajse=0.008):
+def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_sirina, max_visina):
     """
-    Po osnovnem izrezu in odstranitvi sence minimalno in enakomerno skrči vse 4 robove
-    navznoter (0,8 % krajše stranice oz. ~0,18 mm na vsakem robu), da odstrani le
-    skrajni temni rob papirja brez nepotrebne izgube površine lističa.
-    """
-    zl, zd, sd, sl = pts1
-    sirina = max(float(np.linalg.norm(sd - sl)), float(np.linalg.norm(zd - zl)), 50.0)
-    visina = max(float(np.linalg.norm(zd - sd)), float(np.linalg.norm(zl - sl)), 50.0)
-    krajsa = min(sirina, visina)
-    odmik = min(max(1.5, krajsa * delez_krajse), krajsa * 0.02)
-
-    pts2 = np.float32([
-        [0.0, 0.0],
-        [sirina - 1.0, 0.0],
-        [sirina - 1.0, visina - 1.0],
-        [0.0, visina - 1.0],
-    ])
-    matrika = cv2.getPerspectiveTransform(pts1, pts2)
-    matrika_inv = np.linalg.inv(matrika)
-
-    notranji = np.float32([
-        [odmik, odmik],
-        [sirina - 1.0 - odmik, odmik],
-        [sirina - 1.0 - odmik, visina - 1.0 - odmik],
-        [odmik, visina - 1.0 - odmik],
-    ])
-    novi = cv2.perspectiveTransform(notranji.reshape(-1, 1, 2), matrika_inv).reshape(4, 2)
-    novi[:, 0] = np.clip(novi[:, 0], 0.0, float(w_orig - 1))
-    novi[:, 1] = np.clip(novi[:, 1], 0.0, float(h_orig - 1))
-    return uredi_oglisca(novi)
-
-
-def _robustna_premica(tocke_a, tocke_b, privzeta_vrednost):
-    """
-    Prileganje premice b = m * a + c z medianama leve/desne polovice in odstranjevanjem
-    osamelcev, da posamezni temni odtisi ali luknjice ob robu ne potegnejo roba navznoter.
-    """
-    if len(tocke_a) < 8:
-        return 0.0, float(privzeta_vrednost)
-
-    a = np.asarray(tocke_a, dtype=np.float64)
-    b = np.asarray(tocke_b, dtype=np.float64)
-    vrstni_red = np.argsort(a)
-    a = a[vrstni_red]
-    b = b[vrstni_red]
-
-    pol = len(a) // 2
-    a1, b1 = float(np.median(a[:pol])), float(np.median(b[:pol]))
-    a2, b2 = float(np.median(a[pol:])), float(np.median(b[pol:]))
-
-    if abs(a2 - a1) < 1e-3:
-        return 0.0, float(np.median(b))
-
-    m0 = (b2 - b1) / (a2 - a1)
-    c0 = b1 - m0 * a1
-
-    ostanki = np.abs(b - (m0 * a + c0))
-    mad = float(np.median(ostanki))
-    prag = max(2.5, 2.2 * mad)
-    veljavne = ostanki <= prag
-
-    if int(np.sum(veljavne)) >= 6:
-        m, c = np.polyfit(a[veljavne], b[veljavne], 1)
-        m, c = float(m), float(c)
-    else:
-        m, c = float(m0), float(c0)
-
-    if abs(m) > 0.12:
-        return 0.0, float(np.median(b))
-    return m, c
-
-
-def _najdi_robno_premico(je_senca, smer, max_odrez):
-    """
-    Skenira samo od zunanjega roba maske navznoter (največ max_odrez pikslov) in najde
-    prva 2 zaporedna piksla lističa, nato skozi najdene točke prilega ravno robno premico.
-    """
-    h, w = je_senca.shape
-    if smer in ("top", "bottom"):
-        max_o = min(max_odrez, max(1, h // 2 - 2))
-        zac = max(0, int(round(0.06 * w)))
-        kon = min(w, int(round(0.94 * w)))
-        korak = max(1, (kon - zac) // 140)
-        vzorec_x = list(range(zac, kon, korak))
-        xs, ys = [], []
-
-        if smer == "top":
-            for x in vzorec_x:
-                for y in range(0, max_o):
-                    if not je_senca[y, x] and not je_senca[y + 1, x]:
-                        xs.append(x)
-                        ys.append(y)
-                        break
-            if len(xs) < max(8, int(0.25 * len(vzorec_x))):
-                return 0.0, 0.0
-            return _robustna_premica(xs, ys, 0.0)
-        else:
-            for x in vzorec_x:
-                for y in range(h - 1, h - 1 - max_o, -1):
-                    if not je_senca[y, x] and not je_senca[y - 1, x]:
-                        xs.append(x)
-                        ys.append(y)
-                        break
-            if len(xs) < max(8, int(0.25 * len(vzorec_x))):
-                return 0.0, float(h - 1)
-            return _robustna_premica(xs, ys, float(h - 1))
-    else:
-        max_o = min(max_odrez, max(1, w // 2 - 2))
-        zac = max(0, int(round(0.06 * h)))
-        kon = min(h, int(round(0.94 * h)))
-        korak = max(1, (kon - zac) // 140)
-        vzorec_y = list(range(zac, kon, korak))
-        ys, xs = [], []
-
-        if smer == "left":
-            for y in vzorec_y:
-                for x in range(0, max_o):
-                    if not je_senca[y, x] and not je_senca[y, x + 1]:
-                        ys.append(y)
-                        xs.append(x)
-                        break
-            if len(ys) < max(8, int(0.25 * len(vzorec_y))):
-                return 0.0, 0.0
-            return _robustna_premica(ys, xs, 0.0)
-        else:
-            for y in vzorec_y:
-                for x in range(w - 1, w - 1 - max_o, -1):
-                    if not je_senca[y, x] and not je_senca[y, x - 1]:
-                        ys.append(y)
-                        xs.append(x)
-                        break
-            if len(ys) < max(8, int(0.25 * len(vzorec_y))):
-                return 0.0, float(w - 1)
-            return _robustna_premica(ys, xs, float(w - 1))
-
-
-def _presek_robov(premica_h, premica_v):
-    """Presek vodoravne premice y = mh*x + ch in navpične premice x = mv*y + cv."""
-    mh, ch = premica_h
-    mv, cv = premica_v
-    imenovalec = 1.0 - mh * mv
-    if abs(imenovalec) < 1e-6:
-        imenovalec = 1.0
-    y = (mh * cv + ch) / imenovalec
-    x = mv * y + cv
-    return [float(x), float(y)]
-
-
-def _odstrani_senco_na_robovih(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_sirina, max_visina):
-    """
-    Odstrani samo zunanjo kontaktno in sivo senco vzdolž 4 ravnih robov lističa,
-    brez poseganja v notranjost lističa ali v modre/temne kapljice ob robu.
-    Vrne popravljena 4 oglišča v koordinatah izvirne slike.
+    Odstrani zunanjo kontaktno in sivo senco neposredno po dejanski konturi lističa
+    (luščenje sence od zunaj navznoter v ozkem robnem pasu), brez ravnega rezanja ukrivljenih
+    ali perspektivno nagnjenih robov in brez poseganja v notranjost ali modre kapljice.
+    Vrne očiščeno masko v koordinatah izvirne slike.
     """
     if max_sirina < 40 or max_visina < 40:
-        return pts1
+        return zacetna_maska
 
     pts2 = np.float32([
         [0, 0],
@@ -757,14 +609,22 @@ def _odstrani_senco_na_robovih(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
     matrika = cv2.getPerspectiveTransform(pts1, pts2)
 
     poravnan_rgb = cv2.warpPerspective(
-        slika_rgb, matrika, (max_sirina, max_visina), flags=cv2.INTER_LINEAR
+        slika_rgb, matrika, (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
     )
     poravnan_alpha = cv2.warpPerspective(
-        alpha_kanal, matrika, (max_sirina, max_visina), flags=cv2.INTER_LINEAR
+        alpha_kanal, matrika, (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
     poravnan_maska = cv2.warpPerspective(
-        zacetna_maska, matrika, (max_sirina, max_visina), flags=cv2.INTER_NEAREST
+        zacetna_maska, matrika, (max_sirina, max_visina),
+        flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
+
+    dist_od_roba = cv2.distanceTransform((poravnan_maska > 127).astype(np.uint8), cv2.DIST_L2, 5)
+    max_dist = float(dist_od_roba.max())
+    if max_dist < 8.0:
+        return zacetna_maska
 
     lab = cv2.cvtColor(poravnan_rgb, cv2.COLOR_RGB2LAB)
     hsv = cv2.cvtColor(poravnan_rgb, cv2.COLOR_RGB2HSV)
@@ -778,20 +638,16 @@ def _odstrani_senco_na_robovih(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
     B = poravnan_rgb[:, :, 2].astype(np.float32)
 
     # Notranje jedro za referenčno barvo rumenega papirja (varno oddaljeno od robnih senc)
-    rob_odmik = max(4, int(round(0.18 * min(max_sirina, max_visina))))
-    notranjost = np.zeros((max_visina, max_sirina), dtype=bool)
-    if (max_visina - 2 * rob_odmik) >= 10 and (max_sirina - 2 * rob_odmik) >= 10:
-        notranjost[rob_odmik : max_visina - rob_odmik, rob_odmik : max_sirina - rob_odmik] = True
-    notranjost &= (poravnan_maska > 127)
+    notranjost = dist_od_roba >= (0.35 * max_dist)
     if np.sum(notranjost) < 50:
         notranjost = poravnan_maska > 127
     if np.sum(notranjost) < 50:
-        return pts1
+        return zacetna_maska
 
-    # Varnostno preverjanje: če slika ni rumeni listič, oglišč ne spreminjamo
+    # Varnostno preverjanje: če slika ni rumeni listič, maske ne spreminjamo
     p85_b = float(np.percentile(b_lab[notranjost], 85))
     if p85_b < 136.0:
-        return pts1
+        return zacetna_maska
 
     je_rumeno_jedro = notranjost & (b_lab >= max(136.0, p85_b - 16.0))
     if np.sum(je_rumeno_jedro) < 30:
@@ -864,49 +720,48 @@ def _odstrani_senco_na_robovih(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
 
     je_senca = je_zunaj | je_temna_senca | je_siva_senca | je_senca_ozadja
 
-    # Največja dovoljena debelina sence ob kateremkoli robu (16 % krajše stranice)
-    max_odrez = max(6, int(round(0.16 * min(max_sirina, max_visina))))
+    # Luščimo SAMO zunanjo senco, povezano z zunanjostjo lističa in znotraj 16 % krajše stranice
+    max_odrez = max(6.0, 0.16 * float(min(max_sirina, max_visina)))
+    senca_kandidat = ((poravnan_maska < 128) | (je_senca & (dist_od_roba <= max_odrez))).astype(np.uint8)
+    senca_pad = cv2.copyMakeBorder(senca_kandidat, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=1)
+    _, oznake_s = cv2.connectedComponents(senca_pad, connectivity=4)
+    zunanja_senca = oznake_s[1:-1, 1:-1] == oznake_s[0, 0]
 
-    p_top = _najdi_robno_premico(je_senca, "top", max_odrez)
-    p_bot = _najdi_robno_premico(je_senca, "bottom", max_odrez)
-    p_left = _najdi_robno_premico(je_senca, "left", max_odrez)
-    p_right = _najdi_robno_premico(je_senca, "right", max_odrez)
+    cista_warp = np.where(~zunanja_senca, 255, 0).astype(np.uint8)
 
-    tl = _presek_robov(p_top, p_left)
-    tr = _presek_robov(p_top, p_right)
-    br = _presek_robov(p_bot, p_right)
-    bl = _presek_robov(p_bot, p_left)
+    # Rahlo glajenje zapolni morebitne drobne zareze na robu, a popolnoma ohrani ukrivljeno konturo
+    k_glad = max(3, min(9, int(round(min(max_sirina, max_visina) * 0.02)) | 1))
+    jedro_glad = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_glad, k_glad))
+    cista_warp = cv2.morphologyEx(cista_warp, cv2.MORPH_CLOSE, jedro_glad)
+    cista_warp = cv2.bitwise_and(cista_warp, poravnan_maska)
 
-    novi_pts2 = np.array([tl, tr, br, bl], dtype=np.float32)
-    novi_pts2[:, 0] = np.clip(novi_pts2[:, 0], 0.0, float(max_sirina - 1))
-    novi_pts2[:, 1] = np.clip(novi_pts2[:, 1], 0.0, float(max_visina - 1))
+    konture_c, _ = cv2.findContours(cista_warp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not konture_c:
+        return zacetna_maska
 
-    # Varnostna preverjanja geometrije in površine
-    if (
-        novi_pts2[0, 0] >= novi_pts2[1, 0] - 10
-        or novi_pts2[3, 0] >= novi_pts2[2, 0] - 10
-        or novi_pts2[0, 1] >= novi_pts2[3, 1] - 10
-        or novi_pts2[1, 1] >= novi_pts2[2, 1] - 10
-    ):
-        return pts1
+    najvecja_c = max(konture_c, key=cv2.contourArea)
+    cista_warp = np.zeros_like(cista_warp)
+    cv2.drawContours(cista_warp, [najvecja_c], -1, 255, thickness=-1)
 
-    orig_povrsina = float((max_sirina - 1) * (max_visina - 1))
-    nova_povrsina = float(cv2.contourArea(novi_pts2))
-    if nova_povrsina < 0.65 * orig_povrsina:
-        return pts1
+    if cv2.countNonZero(cista_warp) < 0.65 * max(1, cv2.countNonZero(poravnan_maska)):
+        return zacetna_maska
 
     matrika_inv = np.linalg.inv(matrika)
-    novi_pts1 = cv2.perspectiveTransform(novi_pts2.reshape(-1, 1, 2), matrika_inv).reshape(4, 2)
-    novi_pts1[:, 0] = np.clip(novi_pts1[:, 0], 0.0, float(w_orig - 1))
-    novi_pts1[:, 1] = np.clip(novi_pts1[:, 1], 0.0, float(h_orig - 1))
-    return uredi_oglisca(novi_pts1)
+    cista_orig = cv2.warpPerspective(
+        cista_warp, matrika_inv, (w_orig, h_orig),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    _, cista_orig = cv2.threshold(cista_orig, 127, 255, cv2.THRESH_BINARY)
+    cista_orig = cv2.bitwise_and(cista_orig, zacetna_maska)
+    if cv2.countNonZero(cista_orig) < 100:
+        return zacetna_maska
+    return cista_orig
 
 
 def poisci_in_izrezi_avtomatsko(slika_rgb):
     """
-    Izolira listič z rembg (u2net), obreže zunanjo senco vzdolž 4 ravnih robov,
-    nato minimalno skrči izrez navznoter (0,8 % krajše stranice) neposredno iz
-    čiste RGB slike ter listič poravna.
+    Izolira listič po njegovi dejanski konturi z rembg (u2net), po obodu odstrani zunanjo
+    senco ter celotno konturo minimalno skrči navznoter (0,8 % krajše stranice ≈ 0,18 mm).
     Vrne: (koncni_listic_rgba, norm_oglisca, dejanska_maska_izreza)
     """
     h, w = slika_rgb.shape[:2]
@@ -927,20 +782,37 @@ def poisci_in_izrezi_avtomatsko(slika_rgb):
     zacetna_maska = np.zeros((h, w), dtype=np.uint8)
     cv2.drawContours(zacetna_maska, [najvecja_kontura], -1, 255, thickness=-1)
 
-    pravokotnik = cv2.minAreaRect(najvecja_kontura)
-    tocke_pravokotnika = cv2.boxPoints(pravokotnik)
-    pts1_zacetna = uredi_oglisca(tocke_pravokotnika)
+    pravokotnik_z = cv2.minAreaRect(najvecja_kontura)
+    pts1_zacetna = uredi_oglisca(cv2.boxPoints(pravokotnik_z))
     (zl, zd, sd, sl) = pts1_zacetna
 
     max_sirina_z = max(int(np.linalg.norm(sd - sl)), int(np.linalg.norm(zd - zl)), 50)
     max_visina_z = max(int(np.linalg.norm(zd - sd)), int(np.linalg.norm(zl - sl)), 50)
 
-    # 1. Odstranimo zunanjo senco vzdolž 4 robov
-    pts1_brez_sence = _odstrani_senco_na_robovih(
+    # 1. Odstranimo zunanjo senco neposredno po dejanski konturi lističa
+    maska_brez_sence = _odstrani_senco_po_konturi(
         slika_rgb, alpha_kanal, zacetna_maska, pts1_zacetna, max_sirina_z, max_visina_z
     )
-    # 2. Minimalen notranji odrez (0,8 % krajše stranice ≈ 0,18 mm na vsakem robu)
-    pts1 = _zamanjsaj_okvir_navznoter(pts1_brez_sence, w, h, delez_krajse=0.008)
+
+    # 2. Minimalen enakomeren notranji odrez vzdolž dejanske konture (0,8 % krajše stranice)
+    krajsa_z = float(min(max_sirina_z, max_visina_z))
+    odmik_px = min(max(1.5, krajsa_z * 0.008), krajsa_z * 0.02)
+    dist_maska = cv2.distanceTransform(maska_brez_sence, cv2.DIST_L2, 5)
+    dejanska_maska = np.where(dist_maska > odmik_px, 255, 0).astype(np.uint8)
+
+    konture_d, _ = cv2.findContours(dejanska_maska, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if konture_d:
+        najvecja_koncna = max(konture_d, key=cv2.contourArea)
+        dejanska_maska = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(dejanska_maska, [najvecja_koncna], -1, 255, thickness=-1)
+    else:
+        dejanska_maska = maska_brez_sence
+        konture_f, _ = cv2.findContours(dejanska_maska, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        najvecja_koncna = max(konture_f, key=cv2.contourArea) if konture_f else najvecja_kontura
+
+    # Tesen poravnalni okvir okoli dejanske konture (ohrani ukrivljenost prek alpha kanala)
+    pravokotnik = cv2.minAreaRect(najvecja_koncna)
+    pts1 = uredi_oglisca(cv2.boxPoints(pravokotnik))
     (zgoraj_levo, zgoraj_desno, spodaj_desno, spodaj_levo) = pts1
 
     sirina_a = np.linalg.norm(spodaj_desno - spodaj_levo)
@@ -959,30 +831,16 @@ def poisci_in_izrezi_avtomatsko(slika_rgb):
     ])
     matrika = cv2.getPerspectiveTransform(pts1, pts2)
 
-    # Perspektivni izrez izvajamo neposredno iz izvirne RGB slike, da preprečimo
-    # prelivanje črnega ozadja modela rembg na robove lističa
-    maska_stirikotnika = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(maska_stirikotnika, [np.int32(np.round(pts1))], 255)
-    pov_stirikotnika = max(1, cv2.countNonZero(maska_stirikotnika))
-    pokritost_znotraj = cv2.countNonZero(cv2.bitwise_and(maska_stirikotnika, zacetna_maska)) / float(
-        pov_stirikotnika
-    )
-
+    # Barve beremo iz čiste izvirne RGB slike (brez črnega ozadja rembg), obliko pa iz dejanske konture
     poravnan_rgb = cv2.warpPerspective(
-        slika_rgb, matrika, (max_sirina, max_visina), flags=cv2.INTER_LINEAR
+        slika_rgb, matrika, (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
     )
-
-    if pokritost_znotraj >= 0.90:
-        dejanska_maska = maska_stirikotnika
-        poravnan_alpha = np.full((max_visina, max_sirina), 255, dtype=np.uint8)
-    else:
-        dejanska_maska = cv2.bitwise_and(maska_stirikotnika, zacetna_maska)
-        if cv2.countNonZero(dejanska_maska) < 100:
-            dejanska_maska = maska_stirikotnika
-        poravnan_alpha = cv2.warpPerspective(
-            dejanska_maska, matrika, (max_sirina, max_visina), flags=cv2.INTER_NEAREST
-        )
-
+    poravnan_alpha = cv2.warpPerspective(
+        dejanska_maska, matrika, (max_sirina, max_visina),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    _, poravnan_alpha = cv2.threshold(poravnan_alpha, 127, 255, cv2.THRESH_BINARY)
     poravnan_listic = np.concatenate([poravnan_rgb, poravnan_alpha[:, :, None]], axis=2)
 
     # Vodoravna poravnava (daljša stranica je širina)
@@ -1097,7 +955,7 @@ def prikazi_rocni_izrez(slika_rgb, zacetna_oglisca, kljuc, reset_version=0):
 
 
 # =====================================================================
-# ANALIZA KAPLJIC (POLNA ZAZNAVA VSE DO ROBA BREZ ROBNEGA IZKLJUČEVANJA)
+# ANALIZA KAPLJIC (POLNA ZAZNAVA VSE DO DEJANSKE KONTURE LISTIČA)
 # =====================================================================
 
 def _oceni_lokalno_ozadje(kanal, maska_cisto_ozadje, veljavni_indeksi):
@@ -1146,6 +1004,23 @@ def _oceni_lokalno_ozadje(kanal, maska_cisto_ozadje, veljavni_indeksi):
     return cv2.resize(ozadje_s, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
+def _razsiri_rob_signala(signal, veljavni_indeksi, sigma_razsiritev=4.0):
+    """
+    Zunanje neveljavne piksle okoli ukrivljene konture gladko zapolni s sosednjimi
+    vrednostmi signala, da na robu konture ne nastane umeten skok na 0.
+    """
+    if np.all(veljavni_indeksi):
+        return signal
+    sig = signal.copy()
+    sig[~veljavni_indeksi] = 0.0
+    utez = veljavni_indeksi.astype(np.float32)
+    stevec = cv2.GaussianBlur(sig, (0, 0), sigmaX=sigma_razsiritev)
+    imenov = cv2.GaussianBlur(utez, (0, 0), sigmaX=sigma_razsiritev)
+    zunaj_blizu = (~veljavni_indeksi) & (imenov > 1e-4)
+    sig[zunaj_blizu] = stevec[zunaj_blizu] / imenov[zunaj_blizu]
+    return sig
+
+
 def _smerni_tophat_za_podolgovate(signal, dolzina=9):
     """Poudari tanke podolgovate odtise v 4 smereh brez morfološkega širjenja robov."""
     dolzina = max(5, int(dolzina) | 1)
@@ -1183,7 +1058,7 @@ def _smerni_blackhat_za_doline(signal, dolzina=13):
 def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_px=1, obcutljivost=None):
     """
     Zazna velike, zelo majhne (nad 50 μm pri standardnih dimenzijah) in tanke podolgovate
-    odtise po celotni površini izrezanega lističa vse do zadnjega roba.
+    odtise po celotni površini izrezanega lističa vse do zadnjega roba dejanske konture.
     Standardni način in nestandardni način pri občutljivosti 75 % uporabljata enake pragove.
     """
     if izoliran_rgba.shape[2] == 4:
@@ -1198,10 +1073,10 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     krajsa_stran_px = float(min(w, h))
     faktor_loc = float(np.clip(daljsa_stran_px / float(MIN_STANDARDNA_DOLZINA_PX), 1.0, 2.5))
 
-    # 1. Polna maska izrezanega lističa vse do samega roba (brez dodatnega izključevanja roba)
-    _, maska_listica = cv2.threshold(alpha_kanal, 160, 255, cv2.THRESH_BINARY)
+    # 1. Polna maska dejanske konture izrezanega lističa (brez dodatnega izključevanja roba)
+    _, maska_listica = cv2.threshold(alpha_kanal, 128, 255, cv2.THRESH_BINARY)
     if cv2.countNonZero(maska_listica) < 100:
-        _, maska_listica = cv2.threshold(alpha_kanal, 100, 255, cv2.THRESH_BINARY)
+        _, maska_listica = cv2.threshold(alpha_kanal, 64, 255, cv2.THRESH_BINARY)
 
     konture_l, _ = cv2.findContours(maska_listica, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if konture_l:
@@ -1261,6 +1136,9 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     signal = 0.65 * padec_oster + 0.35 * np.minimum(padec_barva, padec_oster * 1.65)
     signal[~veljavni_indeksi] = 0.0
 
+    # Gladko podaljšanje signala čez rob konture prepreči umetne robne artefakte pri filtrih
+    signal_pad = _razsiri_rob_signala(signal, veljavni_indeksi, sigma_razsiritev=4.0 * faktor_loc)
+
     # 4. Robustna ocena šuma ozadja (MAD za svetlostni in barvni kanal na čistih rumenih pikslih)
     visokofrekvencni_sum = np.abs(padec_oster - cv2.GaussianBlur(padec_oster, (3, 3), 0))
     visokofrekvencni_sum_barva = np.abs(padec_barva - cv2.GaussianBlur(padec_barva, (3, 3), 0))
@@ -1312,17 +1190,17 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     # 5. Anti-halo večstopenjska detekcija brez prelivanja v vmesne doline in sedla
     okolica_vel = max(11, int(round(13 * faktor_loc)) | 1)
     jedro_okolica = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (okolica_vel, okolica_vel))
-    lokalni_vrh = cv2.dilate(signal, jedro_okolica, borderType=cv2.BORDER_REPLICATE)
-    gladko_ozko = cv2.GaussianBlur(signal, (0, 0), sigmaX=1.1 * faktor_loc)
-    gladko_rob = cv2.GaussianBlur(signal, (0, 0), sigmaX=1.3 * faktor_loc)
+    lokalni_vrh = cv2.dilate(signal_pad, jedro_okolica, borderType=cv2.BORDER_REPLICATE)
+    gladko_ozko = cv2.GaussianBlur(signal_pad, (0, 0), sigmaX=1.1 * faktor_loc)
+    gladko_rob = cv2.GaussianBlur(signal_pad, (0, 0), sigmaX=1.3 * faktor_loc)
 
     # Rob na 56 % lokalnega maksimuma odreže zunanjo avro in prepreči mostičke med kapljicami
     ni_zunanji_halo = (signal >= 0.56 * lokalni_vrh) | je_absolutno_moder
     maska_jedra = np.where((signal >= prag_jedro) & ni_zunanji_halo, 255, 0).astype(np.uint8)
 
     # Drobni odtisi morajo biti pravi lokalni vrhovi (signal > gladko_ozko)
-    dog_drobni = signal - cv2.GaussianBlur(signal, (0, 0), sigmaX=1.4 * faktor_loc)
-    dog_srednji = signal - cv2.GaussianBlur(signal, (0, 0), sigmaX=3.0 * faktor_loc)
+    dog_drobni = signal_pad - cv2.GaussianBlur(signal_pad, (0, 0), sigmaX=1.4 * faktor_loc)
+    dog_srednji = signal_pad - cv2.GaussianBlur(signal_pad, (0, 0), sigmaX=3.0 * faktor_loc)
     maska_drobna = np.where(
         (signal >= prag_drobni)
         & (signal >= gladko_ozko * 1.01)
@@ -1332,7 +1210,7 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     ).astype(np.uint8)
 
     # Podolgovati tanki odtisi
-    smerni_odziv = _smerni_tophat_za_podolgovate(signal, dolzina=int(round(9 * faktor_loc)) | 1)
+    smerni_odziv = _smerni_tophat_za_podolgovate(signal_pad, dolzina=int(round(9 * faktor_loc)) | 1)
     maska_podolgovata = np.where(
         (smerni_odziv >= prag_podolgovati)
         & (signal >= prag_drobni)
@@ -1347,7 +1225,7 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
 
     # Ciljno čiščenje rumenih vmesnih dolin in sedel med dvema bližnjima kapljicama
     dolina_vel = max(11, int(round(13 * faktor_loc)) | 1)
-    dolina_odziv = _smerni_blackhat_za_doline(signal, dolzina=dolina_vel)
+    dolina_odziv = _smerni_blackhat_za_doline(signal_pad, dolzina=dolina_vel)
     je_oster_vrh = (dog_drobni >= prag_dog * 1.35) & (signal >= gladko_ozko * 1.04)
     je_vmesna_dolina = (
         (~je_absolutno_moder)
