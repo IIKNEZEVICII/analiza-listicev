@@ -1,11 +1,11 @@
-import hashlib
+import base64
 import io
 import os
-import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Analiza lističev", layout="wide")
 
@@ -17,10 +17,228 @@ from slike import (
     prikazi_rocni_izrez,
     analiziraj_kapljice,
     obarvaj_kapljice_rdece,
-    preveri_kakovost_izreza,
 )
 
-OSNOVNI_STOLPCI = ["Ime lističa", "Število odtisov", "Odtisi / cm²", "Pokritost (%)"]
+# --- KOMPONENTA ZA ODPIRANJE PRIVZETE KAMERE TELEFONA ---
+KAMERA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_kamera_komponenta")
+os.makedirs(KAMERA_MAPA, exist_ok=True)
+KAMERA_INDEX_POT = os.path.join(KAMERA_MAPA, "index.html")
+
+HTML_KODA_KAMERE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 4px 0; font-family: sans-serif; background: transparent; }
+  .cam-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .cam-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    background: #ff4b4b; color: #ffffff; border: none; border-radius: 8px;
+    padding: 11px 20px; font-size: 15px; font-weight: 600; cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.12); user-select: none;
+  }
+  .cam-btn:hover { background: #e63e3e; }
+  .cam-btn:active { transform: scale(0.98); }
+  .retry-btn {
+    display: none; align-items: center; justify-content: center; gap: 6px;
+    background: #4b5563; color: #ffffff; border: none; border-radius: 8px;
+    padding: 11px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .retry-btn:hover { background: #374151; }
+  .status { font-size: 12px; color: #7a828e; line-height: 1.4; }
+  .status.err { color: #d32f2f; }
+</style>
+</head>
+<body>
+<div class="cam-wrap">
+  <div class="btn-row">
+    <input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
+    <label for="camInput" class="cam-btn">📷 Odpri kamero telefona</label>
+    <button id="retryBtn" type="button" class="retry-btn">Poskusi znova poslati</button>
+  </div>
+  <div id="status" class="status">Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).</div>
+</div>
+<script>
+const camInput = document.getElementById("camInput");
+const retryBtn = document.getElementById("retryBtn");
+const statusEl = document.getElementById("status");
+const PRIVZET_NAPIS = "Odpre privzeto kamero telefona (ostrenje, bliskavica, povečava).";
+
+let pendingPayload = null;
+let retryTimer = null;
+let lastAckTs = null;
+const MAX_AVTO_POSKUSOV = 10;
+
+function sendMessage(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+
+function updateHeight() {
+  sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight + 8 });
+}
+
+function ustaviPonavljanje() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+function narisiInStisni(img, maxStranica, kakovost) {
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+  const merilo = Math.min(1, maxStranica / Math.max(origW, origH));
+  const nw = Math.max(1, Math.round(origW * merilo));
+  const nh = Math.max(1, Math.round(origH * merilo));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = nw;
+  canvas.height = nh;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, nw, nh);
+  return { dataUrl: canvas.toDataURL("image/jpeg", kakovost), nw: nw, nh: nh };
+}
+
+function posljiTrenutno(rocno) {
+  if (!pendingPayload) return;
+  if (lastAckTs !== null && lastAckTs === pendingPayload.ts) {
+    ustaviPonavljanje();
+    return;
+  }
+
+  pendingPayload.attempt = (pendingPayload.attempt || 0) + 1;
+
+  sendMessage("streamlit:setComponentValue", {
+    value: {
+      name: pendingPayload.name,
+      data_url: pendingPayload.data_url,
+      ts: pendingPayload.ts,
+      attempt: pendingPayload.attempt
+    }
+  });
+
+  statusEl.className = "status";
+  statusEl.textContent = "Nalagam fotografijo ...";
+
+  if (pendingPayload.attempt >= 3) {
+    retryBtn.style.display = "inline-flex";
+  }
+  updateHeight();
+
+  ustaviPonavljanje();
+  if (pendingPayload.attempt < MAX_AVTO_POSKUSOV || rocno) {
+    retryTimer = setTimeout(() => {
+      if (pendingPayload && lastAckTs !== pendingPayload.ts && pendingPayload.attempt < MAX_AVTO_POSKUSOV) {
+        posljiTrenutno(false);
+      } else if (pendingPayload && lastAckTs !== pendingPayload.ts) {
+        statusEl.className = "status err";
+        statusEl.textContent = "Povezava se je med slikanjem prekinila. Tapni »Poskusi znova poslati«.";
+        retryBtn.style.display = "inline-flex";
+        updateHeight();
+      }
+    }, 2200);
+  }
+}
+
+retryBtn.addEventListener("click", () => {
+  if (!pendingPayload) return;
+  pendingPayload.attempt = 0;
+  posljiTrenutno(true);
+});
+
+camInput.addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+
+  ustaviPonavljanje();
+  retryBtn.style.display = "none";
+  statusEl.className = "status";
+  statusEl.textContent = "Pripravljam fotografijo ...";
+  updateHeight();
+
+  const objectUrl = URL.createObjectURL(file);
+  const img = new Image();
+
+  img.onload = () => {
+    try {
+      let res = narisiInStisni(img, 2000, 0.80);
+      if (res.dataUrl.length > 650000) {
+        res = narisiInStisni(img, 1800, 0.70);
+      }
+      if (res.dataUrl.length > 650000) {
+        res = narisiInStisni(img, 1450, 0.65);
+      }
+      URL.revokeObjectURL(objectUrl);
+
+      pendingPayload = {
+        name: file.name || "Kamera_listic.jpg",
+        data_url: res.dataUrl,
+        ts: Date.now(),
+        attempt: 0
+      };
+
+      camInput.value = "";
+      retryTimer = setTimeout(() => posljiTrenutno(false), 500);
+      updateHeight();
+    } catch (err) {
+      URL.revokeObjectURL(objectUrl);
+      statusEl.className = "status err";
+      statusEl.textContent = "Napaka pri pripravi slike: " + err.message;
+      camInput.value = "";
+      updateHeight();
+    }
+  };
+
+  img.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    statusEl.className = "status err";
+    statusEl.textContent = "Napaka pri branju fotografije. Poskusi znova.";
+    camInput.value = "";
+    updateHeight();
+  };
+
+  img.src = objectUrl;
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && pendingPayload && lastAckTs !== pendingPayload.ts) {
+    ustaviPonavljanje();
+    retryTimer = setTimeout(() => posljiTrenutno(false), 700);
+  }
+});
+
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  const args = event.data.args || {};
+  if (args.ack_ts !== undefined && args.ack_ts !== null) {
+    lastAckTs = args.ack_ts;
+    if (pendingPayload && lastAckTs === pendingPayload.ts) {
+      ustaviPonavljanje();
+      retryBtn.style.display = "none";
+      statusEl.className = "status";
+      statusEl.textContent = PRIVZET_NAPIS;
+    }
+  }
+  updateHeight();
+});
+
+sendMessage("streamlit:componentReady", { apiVersion: 1 });
+updateHeight();
+</script>
+</body>
+</html>
+"""
+
+_obstojeca_kamera = ""
+if os.path.exists(KAMERA_INDEX_POT):
+    with open(KAMERA_INDEX_POT, "r", encoding="utf-8") as f:
+        _obstojeca_kamera = f.read()
+if _obstojeca_kamera != HTML_KODA_KAMERE:
+    with open(KAMERA_INDEX_POT, "w", encoding="utf-8") as f:
+        f.write(HTML_KODA_KAMERE)
+
+_komponenta_kamera = components.declare_component("nativna_kamera", path=KAMERA_MAPA)
 
 PRIVZETI_PARAMETRI_LETA = {
     "Višina leta (m)": 3.0,
@@ -32,75 +250,20 @@ PRIVZETI_PARAMETRI_LETA = {
     "Relativna vlažnost (%)": 60,
 }
 
-
-@st.cache_data(max_entries=5, show_spinner=False)
-def nalozi_sliko_rgb(bajti_slike, kljuc_slike):
-    """Enkratno dekodiranje in EXIF poravnava naložene slike."""
-    pil_slika = ImageOps.exif_transpose(Image.open(io.BytesIO(bajti_slike))).convert("RGB")
-    return np.array(pil_slika)
-
-
-@st.cache_data(max_entries=5, show_spinner=False)
-def pripravi_predogled_izreza_jpg(_slika_rgb, oglisca_kljuc, _dejanska_maska, kljuc_slike):
-    """Predpomnjen predogled avtomatskega izreza kot lahek JPEG."""
-    predogled = narisi_predogled_izreza(_slika_rgb, oglisca_kljuc, dejanska_maska=_dejanska_maska)
-    buf = io.BytesIO()
-    Image.fromarray(predogled).save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
-@st.cache_data(max_entries=6, show_spinner=False)
-def pripravi_podlago_za_prikaz(_izrezan_listic, _maska_kapljic, kljuc_prikaza):
-    """
-    Pripravi zaslonsko različico lističa (do 1400 px širine) in maske za takojšen odziv
-    drsnika prosojnosti. INTER_AREA + (> 0) na maski ohrani vidnost vseh drobnih 50 μm pik.
-    """
-    if _izrezan_listic.shape[2] == 4:
-        rgb = _izrezan_listic[:, :, :3].copy()
-        rgb[_izrezan_listic[:, :, 3] < 128] = 20
-    else:
-        rgb = _izrezan_listic
-
-    h, w = rgb.shape[:2]
-    max_prikaz_w = 1400
-    if w > max_prikaz_w:
-        merilo = max_prikaz_w / float(w)
-        nw = max_prikaz_w
-        nh = max(20, int(round(h * merilo)))
-        rgb_m = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
-        maska_m = (
-            cv2.resize(_maska_kapljic, (nw, nh), interpolation=cv2.INTER_AREA) > 0
-        ).astype(np.uint8) * 255
-        return rgb_m, maska_m
-
-    return rgb, _maska_kapljic
-
-
-@st.fragment
-def prikazi_interaktivni_prekriv(slika_prikaz_rgb, maska_prikaz):
-    """Fragment omogoča takojšnje spreminjanje prosojnosti brez ponovnega zagona celotne strani."""
-    prosojnost = st.slider(
-        "Prosojnost zaznanih kapljic (%)", 0, 100, 75, key="prosojnost_kapljic"
+if "rezultati" not in st.session_state:
+    st.session_state.rezultati = pd.DataFrame(
+        columns=["Ime lističa", "Število odtisov", "Odtisi / cm²", "Pokritost (%)"]
     )
-    slika_z_odtisom = obarvaj_kapljice_rdece(slika_prikaz_rgb, maska_prikaz, prosojnost)
-    buf = io.BytesIO()
-    Image.fromarray(slika_z_odtisom).save(buf, format="JPEG", quality=92, subsampling=0)
-    st.image(buf.getvalue(), width="stretch")
-
-
-# --- INICIALIZACIJA STANJA SEJE ---
-if "rezultati_baza" not in st.session_state:
-    st.session_state.rezultati_baza = pd.DataFrame(columns=OSNOVNI_STOLPCI)
-if "zadnja_tabela" not in st.session_state:
-    st.session_state.zadnja_tabela = st.session_state.rezultati_baza.copy()
-if "tabela_verzija" not in st.session_state:
-    st.session_state.tabela_verzija = 0
 if "oglisca_slik" not in st.session_state:
     st.session_state.oglisca_slik = {}
 if "reset_verzija_izreza" not in st.session_state:
     st.session_state.reset_verzija_izreza = {}
 if "kamera_slike" not in st.session_state:
     st.session_state.kamera_slike = {}
+if "zadnji_kamera_ts" not in st.session_state:
+    st.session_state.zadnji_kamera_ts = None
+if "stevec_kamere" not in st.session_state:
+    st.session_state.stevec_kamere = 0
 
 # --- DRSNO STRANSKO OKNO: PARAMETRI LETA ---
 with st.sidebar:
@@ -139,38 +302,49 @@ with zav1:
         label_visibility="collapsed",
     )
 with zav2:
-    slika_kamere = st.camera_input("Slikaj listič", label_visibility="collapsed")
+    slika_kamere_podatki = _komponenta_kamera(
+        ack_ts=st.session_state.zadnji_kamera_ts,
+        key="nativna_kamera",
+    )
+    if (
+        isinstance(slika_kamere_podatki, dict)
+        and slika_kamere_podatki.get("ts") != st.session_state.zadnji_kamera_ts
+        and slika_kamere_podatki.get("data_url")
+    ):
+        st.session_state.zadnji_kamera_ts = slika_kamere_podatki["ts"]
+        data_url = slika_kamere_podatki["data_url"]
+        if "," in data_url:
+            _, b64_podatki = data_url.split(",", 1)
+            st.session_state.stevec_kamere += 1
+            ime_slike = f"Kamera_listic_{st.session_state.stevec_kamere}.jpg"
+            st.session_state.kamera_slike[ime_slike] = base64.b64decode(b64_podatki)
+            st.session_state.izbrani_listic_select = ime_slike
+            st.rerun()
 
 vsi_listici = {}
 if nalozene_datoteke:
     for dat in nalozene_datoteke:
-        bajti = dat.getvalue()
-        kljuc = hashlib.md5(bajti).hexdigest()
-        ime = dat.name
-        if ime in vsi_listici:
-            osnova, koncnica = os.path.splitext(ime)
-            st_kopije = 2
-            while f"{osnova}_{st_kopije}{koncnica}" in vsi_listici:
-                st_kopije += 1
-            ime = f"{osnova}_{st_kopije}{koncnica}"
-        vsi_listici[ime] = (kljuc, bajti)
-
-if slika_kamere:
-    bajti_kam = slika_kamere.getvalue()
-    kljuc_kam = hashlib.md5(bajti_kam).hexdigest()
-    if kljuc_kam not in st.session_state.kamera_slike:
-        zap_st = len(st.session_state.kamera_slike) + 1
-        st.session_state.kamera_slike[kljuc_kam] = (f"Kamera_{zap_st}.jpg", bajti_kam)
-
-for kljuc_kam, (ime_kam, bajti_kam) in st.session_state.kamera_slike.items():
-    vsi_listici[ime_kam] = (kljuc_kam, bajti_kam)
+        vsi_listici[dat.name] = dat
+for ime_k, bajti_k in st.session_state.kamera_slike.items():
+    vsi_listici[ime_k] = io.BytesIO(bajti_k)
 
 if vsi_listici:
-    izbrano_ime = st.selectbox("Izberi listič za analizo", list(vsi_listici.keys()))
-    kljuc_slike, izbrani_bajti = vsi_listici[izbrano_ime]
+    imena_listicev = list(vsi_listici.keys())
+    if (
+        "izbrani_listic_select" in st.session_state
+        and st.session_state.izbrani_listic_select not in vsi_listici
+    ):
+        st.session_state.izbrani_listic_select = imena_listicev[0]
+
+    izbrano_ime = st.selectbox(
+        "Izberi listič za analizo", imena_listicev, key="izbrani_listic_select"
+    )
+    izbrana_datoteka = vsi_listici[izbrano_ime]
     osnovno_ime = os.path.splitext(izbrano_ime)[0]
 
-    slika_rgb = nalozi_sliko_rgb(izbrani_bajti, kljuc_slike)
+    # Samodejna korekcija EXIF orientacije fotografij s telefona
+    pil_slika = ImageOps.exif_transpose(Image.open(izbrana_datoteka)).convert("RGB")
+    slika_rgb = np.array(pil_slika)
 
     st.divider()
 
@@ -202,9 +376,7 @@ if vsi_listici:
 
     # --- OBREZOVANJE LISTIČA (AVTOMATSKO rembg u2net ALI ROČNO) ---
     with st.spinner("Izrezujem listič iz ozadja (rembg u2net)..."):
-        avto_listic, avto_oglisca, dejanska_maska = poisci_in_izrezi_avtomatsko(
-            slika_rgb, kljuc_slike=kljuc_slike
-        )
+        avto_listic, avto_oglisca, dejanska_maska = poisci_in_izrezi_avtomatsko(slika_rgb)
         napaka_rembg = preveri_rembg_napako()
 
     if napaka_rembg:
@@ -213,67 +385,37 @@ if vsi_listici:
             f"Podrobnost napake: `{napaka_rembg}`"
         )
 
-    if kljuc_slike not in st.session_state.oglisca_slik:
-        st.session_state.oglisca_slik[kljuc_slike] = avto_oglisca
-    if kljuc_slike not in st.session_state.reset_verzija_izreza:
-        st.session_state.reset_verzija_izreza[kljuc_slike] = 0
+    if izbrano_ime not in st.session_state.oglisca_slik:
+        st.session_state.oglisca_slik[izbrano_ime] = avto_oglisca
+    if izbrano_ime not in st.session_state.reset_verzija_izreza:
+        st.session_state.reset_verzija_izreza[izbrano_ime] = 0
 
     if avtomatski_izrez:
         izrezan_listic = avto_listic
-        aktivna_oglisca = avto_oglisca
-        kljuc_izreza = f"{kljuc_slike}_auto"
         with st.expander("👁️ Preveri avtomatski izrez na izvirni sliki", expanded=False):
-            predogled_jpg = pripravi_predogled_izreza_jpg(
-                slika_rgb,
-                tuple(tuple(round(v, 4) for v in pt) for pt in avto_oglisca),
-                dejanska_maska,
-                kljuc_slike,
+            st.image(
+                narisi_predogled_izreza(slika_rgb, avto_oglisca, dejanska_maska=dejanska_maska),
+                use_container_width=True,
             )
-            st.image(predogled_jpg, width="stretch")
     else:
         if st.button("🔄 Ponastavi avtomatski izrez"):
-            st.session_state.oglisca_slik[kljuc_slike] = avto_oglisca
-            st.session_state.reset_verzija_izreza[kljuc_slike] += 1
+            st.session_state.oglisca_slik[izbrano_ime] = avto_oglisca
+            st.session_state.reset_verzija_izreza[izbrano_ime] += 1
 
         oglisca = prikazi_rocni_izrez(
             slika_rgb,
-            st.session_state.oglisca_slik[kljuc_slike],
-            kljuc=f"izrez_{kljuc_slike}",
-            reset_version=st.session_state.reset_verzija_izreza[kljuc_slike],
-            kljuc_slike=kljuc_slike,
+            st.session_state.oglisca_slik[izbrano_ime],
+            kljuc=f"izrez_{izbrano_ime}",
+            reset_version=st.session_state.reset_verzija_izreza[izbrano_ime],
         )
-        st.session_state.oglisca_slik[kljuc_slike] = oglisca
-        aktivna_oglisca = oglisca
-        oglisca_podpis = tuple((round(p[0], 4), round(p[1], 4)) for p in oglisca)
-        kljuc_izreza = f"{kljuc_slike}_rocno_{oglisca_podpis}"
+        st.session_state.oglisca_slik[izbrano_ime] = oglisca
         izrezan_listic = izrezi_listic_rocno(slika_rgb, oglisca)
-
-    # --- PREVERJANJE KAKOVOSTI IZREZA (RAZMERJE STRANIC IN LOČLJIVOST) ---
-    if standardna_dim:
-        kakovost = preveri_kakovost_izreza(slika_rgb, aktivna_oglisca)
-        if kakovost["razmerje"] < 2.7 or kakovost["razmerje"] > 4.3:
-            st.warning(
-                f"Razmerje stranic izreza je **{kakovost['razmerje']} : 1** "
-                f"(standardni listič 76 × 22 mm ima razmerje **3,45 : 1**). "
-                f"Če je izrezan le del lističa, izklopi standardne dimenzije ali popravi izrez."
-            )
-        if kakovost["px_na_mm"] < 15.0:
-            st.info(
-                f"Izvirna ločljivost izrezanega lističa je nizka (**{kakovost['px_na_mm']} px/mm**). "
-                f"Najdrobnejši odtisi okoli 50 μm morda niso fizično razločljivi."
-            )
 
     maska_kapljic, st_odtisov, odtisi_cm2, pokritost = analiziraj_kapljice(
         izrezan_listic,
         standardna_dimenzija=standardna_dim,
         min_velikost_px=min_velikost_px,
         obcutljivost=obcutljivost,
-        kljuc_izreza=kljuc_izreza,
-    )
-
-    kljuc_prikaza = f"{kljuc_izreza}_{standardna_dim}_{min_velikost_px}_{obcutljivost}"
-    slika_prikaz_rgb, maska_prikaz = pripravi_podlago_za_prikaz(
-        izrezan_listic, maska_kapljic, kljuc_prikaza
     )
 
     st.divider()
@@ -282,7 +424,9 @@ if vsi_listici:
     prikaz_kol, rezultati_kol = st.columns([3, 2])
 
     with prikaz_kol:
-        prikazi_interaktivni_prekriv(slika_prikaz_rgb, maska_prikaz)
+        prosojnost = st.slider("Prosojnost zaznanih kapljic (%)", 0, 100, 75)
+        slika_z_odtisom = obarvaj_kapljice_rdece(izrezan_listic, maska_kapljic, prosojnost)
+        st.image(slika_z_odtisom, use_container_width=True)
 
     with rezultati_kol:
         if standardna_dim:
@@ -295,59 +439,46 @@ if vsi_listici:
             m1.metric("Vsi odtisi", f"{st_odtisov}")
             m2.metric("Pokritost", f"{pokritost} %")
 
-        if st.button("💾 Shrani v preglednico", width="stretch", type="primary"):
-            df = st.session_state.zadnja_tabela.copy()
-            for stolpec in OSNOVNI_STOLPCI:
-                if stolpec not in df.columns:
-                    df[stolpec] = np.nan
-
+        if st.button("💾 Shrani v preglednico", use_container_width=True, type="primary"):
             nova_vrstica = {
                 "Ime lističa": osnovno_ime,
-                "Število odtisov": int(st_odtisov),
-                "Odtisi / cm²": float(odtisi_cm2) if (standardna_dim and odtisi_cm2 is not None) else np.nan,
-                "Pokritost (%)": float(pokritost),
+                "Število odtisov": st_odtisov,
+                "Odtisi / cm²": odtisi_cm2 if standardna_dim else "-",
+                "Pokritost (%)": pokritost,
             }
             for k, v in izbrani_parametri.items():
                 nova_vrstica[k] = v
 
+            df = st.session_state.rezultati
             if not df.empty and osnovno_ime in df["Ime lističa"].values:
                 idx = df.index[df["Ime lističa"] == osnovno_ime][0]
-                # Počistimo morebitne stare parametre leta, ki pri novem shranjevanju niso izbrani
-                for param in PRIVZETI_PARAMETRI_LETA:
-                    if param in df.columns and param not in izbrani_parametri:
-                        df.loc[idx, param] = np.nan
                 for k, v in nova_vrstica.items():
-                    if k not in df.columns:
-                        df[k] = np.nan
                     df.loc[idx, k] = v
+                st.session_state.rezultati = df
             else:
-                df = pd.concat([df, pd.DataFrame([nova_vrstica])], ignore_index=True)
-
-            st.session_state.rezultati_baza = df
-            st.session_state.zadnja_tabela = df.copy()
-            st.session_state.tabela_verzija += 1
-            st.rerun()
+                st.session_state.rezultati = pd.concat(
+                    [df, pd.DataFrame([nova_vrstica])], ignore_index=True
+                )
 
 # --- SPODNJA UREJEVALNA PREGLEDNICA IN IZVOZ V EXCEL ---
-if not st.session_state.rezultati_baza.empty:
+if not st.session_state.rezultati.empty:
     st.divider()
     urejena_tabela = st.data_editor(
-        st.session_state.rezultati_baza,
+        st.session_state.rezultati,
         num_rows="dynamic",
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
-        key=f"urejevalnik_rezultatov_{st.session_state.tabela_verzija}",
+        key="urejevalnik_rezultatov",
     )
-    st.session_state.zadnja_tabela = urejena_tabela
+    st.session_state.rezultati = urejena_tabela
 
-    if not urejena_tabela.empty:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            urejena_tabela.to_excel(writer, index=False, sheet_name="Rezultati")
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        urejena_tabela.to_excel(writer, index=False, sheet_name="Rezultati")
 
-        st.download_button(
-            label="📥 Izvozi v Excel (.xlsx)",
-            data=excel_buffer.getvalue(),
-            file_name="Analiza_listicev.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    st.download_button(
+        label="📥 Izvozi v Excel (.xlsx)",
+        data=excel_buffer.getvalue(),
+        file_name="Analiza_listicev.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
