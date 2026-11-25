@@ -1,8 +1,8 @@
-streamlit
-opencv-python-headless
-numpy
-pillow
-rembg
-onnxruntime
-pandas
-openpyxl
+streamlit>=1.38.0,<2.0.0
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+pillow>=10.0.0
+rembg>=2.0.50
+onnxruntime>=1.17.0
+pandas>=2.1.0
+openpyxl>=3.1.0
