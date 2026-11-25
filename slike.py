@@ -5,7 +5,7 @@ import math
 import os
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -20,6 +20,9 @@ PRIVZETA_OBCUTLJIVOST_STANDARD = 75.0
 # da se drobne kapljice velikosti 50 μm pri skenih ne izgubijo s pomanjševanjem.
 MIN_STANDARDNA_DOLZINA_PX = 1520
 MAX_STANDARDNA_DOLZINA_PX = 3040
+
+# Usklajena zgornja meja predpomnilnika za varno porabo pomnilnika RAM
+AVTO_IZREZ_CACHE_MAX = 5
 
 
 @st.cache_resource
@@ -38,37 +41,37 @@ def preveri_rembg_napako():
     return napaka
 
 
-@st.cache_data(show_spinner=False)
-def _odstrani_ozadje_rembg(slika_png_bajti, kljuc_slike):
-    """
-    Izolacija ozadja z nevronsko mrežo rembg (u2net).
-    """
-    vhodna_slika = Image.open(io.BytesIO(slika_png_bajti))
-    seja, napaka = _pridobi_rembg_sejo()
-    if seja is not None and napaka is None:
-        from rembg import remove
-        slika_rgba = remove(vhodna_slika, session=seja)
-        return np.array(slika_rgba)
-
-    arr = np.array(vhodna_slika.convert("RGB"))
-    polni_alpha = np.full((arr.shape[0], arr.shape[1], 1), 255, dtype=np.uint8)
-    return np.concatenate([arr, polni_alpha], axis=2)
+@st.cache_data(max_entries=6, show_spinner=False)
+def nalozi_sliko_rgb(kljuc_slike, _surovi_bajti):
+    """Odpre sliko (tudi 16-bitni TIFF), popravi orientacijo EXIF in vrne 8-bitno polje RGB."""
+    with Image.open(io.BytesIO(_surovi_bajti)) as img:
+        pil_slika = ImageOps.exif_transpose(img)
+        if pil_slika.mode.startswith("I;16") or pil_slika.mode == "I":
+            arr = np.array(pil_slika, dtype=np.float32)
+            max_val = float(arr.max())
+            if max_val > 255.0:
+                arr = np.clip(arr * (255.0 / max_val), 0.0, 255.0)
+            pil_slika = Image.fromarray(arr.astype(np.uint8)).convert("RGB")
+        else:
+            pil_slika = pil_slika.convert("RGB")
+        return np.array(pil_slika)
 
 
 def pridobi_izoliran_rgba(slika_rgb):
-    kljuc = hashlib.md5(slika_rgb.tobytes()).hexdigest()
-    buf = io.BytesIO()
-    Image.fromarray(slika_rgb).save(buf, format="PNG")
-    return _odstrani_ozadje_rembg(buf.getvalue(), kljuc)
+    """Izolacija ozadja z nevronsko mrežo rembg (u2net) brez nepotrebnega kodiranja v PNG."""
+    seja, napaka = _pridobi_rembg_sejo()
+    if seja is not None and napaka is None:
+        from rembg import remove
+        slika_rgba = remove(Image.fromarray(slika_rgb), session=seja)
+        return np.array(slika_rgba)
+
+    polni_alpha = np.full((slika_rgb.shape[0], slika_rgb.shape[1], 1), 255, dtype=np.uint8)
+    return np.concatenate([slika_rgb, polni_alpha], axis=2)
 
 
 # =====================================================================
 # INTERAKTIVNA KOMPONENTA ZA ROČNI IZREZ (PRILAGOJENA TELEFONU + LUPA NA ROBU)
 # =====================================================================
-
-KOMPONENTA_MAPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_izrez_komponenta_v2")
-os.makedirs(KOMPONENTA_MAPA, exist_ok=True)
-INDEX_POT = os.path.join(KOMPONENTA_MAPA, "index.html")
 
 HTML_KODA_IZREZA = """<!DOCTYPE html>
 <html>
@@ -524,15 +527,20 @@ sendMessage("streamlit:componentReady", { apiVersion: 1 });
 </html>
 """
 
-_obstojece = ""
-if os.path.exists(INDEX_POT):
-    with open(INDEX_POT, "r", encoding="utf-8") as f:
-        _obstojece = f.read()
-if _obstojece != HTML_KODA_IZREZA:
-    with open(INDEX_POT, "w", encoding="utf-8") as f:
-        f.write(HTML_KODA_IZREZA)
 
-_komponenta_izrez = components.declare_component("stirikotnik_izrez_v2", path=KOMPONENTA_MAPA)
+@st.cache_resource
+def _pridobi_komponento_izreza():
+    komponenta_mapa = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_izrez_komponenta_v2")
+    os.makedirs(komponenta_mapa, exist_ok=True)
+    index_pot = os.path.join(komponenta_mapa, "index.html")
+    obstojece = ""
+    if os.path.exists(index_pot):
+        with open(index_pot, "r", encoding="utf-8") as f:
+            obstojece = f.read()
+    if obstojece != HTML_KODA_IZREZA:
+        with open(index_pot, "w", encoding="utf-8") as f:
+            f.write(HTML_KODA_IZREZA)
+    return components.declare_component("stirikotnik_izrez_v2", path=komponenta_mapa)
 
 
 # =====================================================================
@@ -745,7 +753,11 @@ def _odstrani_senco_po_konturi(slika_rgb, alpha_kanal, zacetna_maska, pts1, max_
     if cv2.countNonZero(cista_warp) < 0.65 * max(1, cv2.countNonZero(poravnan_maska)):
         return zacetna_maska
 
-    matrika_inv = np.linalg.inv(matrika)
+    try:
+        matrika_inv = np.linalg.inv(matrika)
+    except np.linalg.LinAlgError:
+        return zacetna_maska
+
     cista_orig = cv2.warpPerspective(
         cista_warp,
         matrika_inv,
@@ -865,11 +877,22 @@ def poisci_in_izrezi_avtomatsko(slika_rgb):
     return koncni_listic, norm_oglisca, dejanska_maska
 
 
+@st.cache_data(max_entries=AVTO_IZREZ_CACHE_MAX, show_spinner=False)
+def poisci_in_izrezi_avtomatsko_predpomnjeno(kljuc_slike, _slika_rgb):
+    """Predpomnjen ovoj okoli avtomatskega izreza (prepreči ponavljanje ob premiku drsnikov)."""
+    return poisci_in_izrezi_avtomatsko(_slika_rgb)
+
+
 def izrezi_listic_rocno(slika_rgb, norm_oglisca):
     """Perspektivni izrez za ročni način iz 4 ročno nastavljenih oglišč."""
     h, w = slika_rgb.shape[:2]
-    tocke = np.array([[pt[0] * w, pt[1] * h] for pt in norm_oglisca], dtype=np.float32)
+    tocke = np.array([[float(pt[0]) * w, float(pt[1]) * h] for pt in norm_oglisca], dtype=np.float32)
     pts1 = uredi_oglisca(tocke)
+
+    # Varnost pred popolnoma prekrivajočimi se ali kolinearnimi oglišči
+    if cv2.contourArea(pts1) < 16.0:
+        pts1 = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+
     (zgoraj_levo, zgoraj_desno, spodaj_desno, spodaj_levo) = pts1
 
     sirina_a = np.linalg.norm(spodaj_desno - spodaj_levo)
@@ -886,10 +909,15 @@ def izrezi_listic_rocno(slika_rgb, norm_oglisca):
         [max_sirina - 1, max_visina - 1],
         [0, max_visina - 1],
     ])
-    matrika = cv2.getPerspectiveTransform(pts1, pts2)
-    poravnan_rgb = cv2.warpPerspective(
-        slika_rgb, matrika, (max_sirina, max_visina), flags=cv2.INTER_LINEAR
-    )
+    try:
+        matrika = cv2.getPerspectiveTransform(pts1, pts2)
+        poravnan_rgb = cv2.warpPerspective(
+            slika_rgb, matrika, (max_sirina, max_visina), flags=cv2.INTER_LINEAR
+        )
+    except cv2.error:
+        poravnan_rgb = slika_rgb.copy()
+        max_visina, max_sirina = poravnan_rgb.shape[:2]
+
     polni_alpha = np.full((max_visina, max_sirina, 1), 255, dtype=np.uint8)
     poravnan_listic = np.concatenate([poravnan_rgb, polni_alpha], axis=2)
 
@@ -897,6 +925,12 @@ def izrezi_listic_rocno(slika_rgb, norm_oglisca):
         poravnan_listic = cv2.rotate(poravnan_listic, cv2.ROTATE_90_CLOCKWISE)
 
     return _prilagodi_locljivost_listica(poravnan_listic)
+
+
+@st.cache_data(max_entries=6, show_spinner=False)
+def izrezi_listic_rocno_predpomnjeno(kljuc_slike, oglisca_kljuc, _slika_rgb):
+    """Predpomnjen ovoj za ročni izrez."""
+    return izrezi_listic_rocno(_slika_rgb, oglisca_kljuc)
 
 
 def narisi_predogled_izreza(slika_rgb, norm_oglisca, dejanska_maska=None):
@@ -943,24 +977,45 @@ def narisi_predogled_izreza(slika_rgb, norm_oglisca, dejanska_maska=None):
     return rezultat
 
 
-def prikazi_rocni_izrez(slika_rgb, zacetna_oglisca, kljuc, reset_version=0):
-    h, w = slika_rgb.shape[:2]
+@st.cache_data(max_entries=5, show_spinner=False)
+def narisi_predogled_izreza_predpomnjeno(kljuc_slike, _slika_rgb, _norm_oglisca, _dejanska_maska):
+    """Predpomnjen ovoj za risanje predogleda avtomatskega izreza."""
+    return narisi_predogled_izreza(_slika_rgb, _norm_oglisca, dejanska_maska=_dejanska_maska)
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _pripravi_predogled_b64(kljuc_slike, _slika_rgb):
+    h, w = _slika_rgb.shape[:2]
     max_dim = 900
     merilo = min(1.0, max_dim / max(w, h))
-    predogled = cv2.resize(slika_rgb, (int(w * merilo), int(h * merilo)), interpolation=cv2.INTER_AREA)
+    predogled = (
+        cv2.resize(_slika_rgb, (int(w * merilo), int(h * merilo)), interpolation=cv2.INTER_AREA)
+        if merilo < 1.0
+        else _slika_rgb
+    )
 
     pil_img = Image.fromarray(predogled)
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG", quality=88)
-    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    rezultat = _komponenta_izrez(
+
+def prikazi_rocni_izrez(slika_rgb, zacetna_oglisca, kljuc, reset_version=0, kljuc_slike=None):
+    if kljuc_slike is None:
+        kljuc_slike = hashlib.md5(slika_rgb.tobytes()).hexdigest()
+
+    b64_str = _pripravi_predogled_b64(kljuc_slike, slika_rgb)
+    komponenta_izrez = _pridobi_komponento_izreza()
+
+    rezultat = komponenta_izrez(
         image_b64=b64_str,
         initial_corners=zacetna_oglisca,
         reset_version=int(reset_version),
-        key=kljuc,
+        key=f"{kljuc}_v{int(reset_version)}",
     )
-    return rezultat if rezultat is not None else zacetna_oglisca
+    if isinstance(rezultat, list) and len(rezultat) == 4:
+        return rezultat
+    return zacetna_oglisca
 
 
 # =====================================================================
@@ -1277,16 +1332,16 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
     prag_vecji_komp = int(round(12.0 * (faktor_loc ** 2)))
     st_oznak, oznake, statistika, _ = cv2.connectedComponentsWithStats(surova_maska, connectivity=8)
 
-    filtrirana_maska = np.zeros((h, w), dtype=np.uint8)
+    veljavne_oznake = np.zeros(st_oznak, dtype=bool)
     stevilo_odtisov = 0
     povrsina_kapljic_px = 0
 
     for i in range(1, st_oznak):
-        povrsina = statistika[i, cv2.CC_STAT_AREA]
-        x0 = statistika[i, cv2.CC_STAT_LEFT]
-        y0 = statistika[i, cv2.CC_STAT_TOP]
-        sirina_komp = statistika[i, cv2.CC_STAT_WIDTH]
-        visina_komp = statistika[i, cv2.CC_STAT_HEIGHT]
+        povrsina = int(statistika[i, cv2.CC_STAT_AREA])
+        x0 = int(statistika[i, cv2.CC_STAT_LEFT])
+        y0 = int(statistika[i, cv2.CC_STAT_TOP])
+        sirina_komp = int(statistika[i, cv2.CC_STAT_WIDTH])
+        visina_komp = int(statistika[i, cv2.CC_STAT_HEIGHT])
 
         daljsa_k = max(sirina_komp, visina_komp)
         krajsa_k = max(1, min(sirina_komp, visina_komp))
@@ -1298,9 +1353,8 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
         ):
             continue
 
-        komp_maska = oznake[y0 : y0 + visina_komp, x0 : x0 + sirina_komp] == i
-
         if ima_barvni_kontrast:
+            komp_maska = oznake[y0 : y0 + visina_komp, x0 : x0 + sirina_komp] == i
             barva_izsek = padec_barva[y0 : y0 + visina_komp, x0 : x0 + sirina_komp]
             if povrsina >= prag_vecji_komp:
                 if float(np.mean(barva_izsek[komp_maska])) < prag_barva_komp:
@@ -1316,25 +1370,56 @@ def analiziraj_kapljice(izoliran_rgba, standardna_dimenzija=True, min_velikost_p
                 if max_barva_okolica < prag_barva_drobni and max_oster < (prag_jedro * 1.25):
                     continue
 
-        filtrirana_maska[y0 : y0 + visina_komp, x0 : x0 + sirina_komp][komp_maska] = 255
+        veljavne_oznake[i] = True
         stevilo_odtisov += 1
         povrsina_kapljic_px += povrsina
 
+    filtrirana_maska = np.where(veljavne_oznake[oznake], 255, 0).astype(np.uint8)
     pokritost_proc = round((povrsina_kapljic_px / skupni_piksli) * 100.0, 2)
     odtisi_na_cm2 = round(stevilo_odtisov / STANDARDNA_POVRSINA_CM2, 2) if standardna_dimenzija else None
 
     return filtrirana_maska, stevilo_odtisov, odtisi_na_cm2, pokritost_proc
 
 
+@st.cache_data(max_entries=8, show_spinner=False)
+def analiziraj_kapljice_predpomnjeno(
+    kljuc_izreza, _izoliran_rgba, standardna_dimenzija=True, min_velikost_px=1, obcutljivost=None
+):
+    """Predpomnjen ovoj za analizo kapljic."""
+    return analiziraj_kapljice(
+        _izoliran_rgba,
+        standardna_dimenzija=standardna_dimenzija,
+        min_velikost_px=min_velikost_px,
+        obcutljivost=obcutljivost,
+    )
+
+
 def obarvaj_kapljice_rdece(izoliran_rgba, maska, prosojnost_proc):
-    prosojnost_rdece = np.clip(prosojnost_proc / 100.0, 0.0, 1.0)
-    rezultat = izoliran_rgba.copy().astype(np.float32)
+    prosojnost_rdece = float(np.clip(prosojnost_proc / 100.0, 0.0, 1.0))
+    rezultat = izoliran_rgba.copy()
+    if prosojnost_rdece <= 0.0:
+        return rezultat
+
+    idx = maska > 0
+    if not np.any(idx):
+        return rezultat
 
     if rezultat.shape[2] == 4:
         rdeca_barva = np.array([255.0, 0.0, 0.0, 255.0], dtype=np.float32)
     else:
         rdeca_barva = np.array([255.0, 0.0, 0.0], dtype=np.float32)
 
-    idx = maska > 0
-    rezultat[idx] = rezultat[idx] * (1.0 - prosojnost_rdece) + rdeca_barva * prosojnost_rdece
-    return rezultat.astype(np.uint8)
+    obarvani = (
+        rezultat[idx].astype(np.float32) * (1.0 - prosojnost_rdece)
+        + rdeca_barva * prosojnost_rdece
+    )
+    rezultat[idx] = np.clip(obarvani, 0.0, 255.0).astype(np.uint8)
+    return rezultat
+
+
+@st.cache_data(max_entries=4, show_spinner=False)
+def pripravi_png_slike(kljuc_analize, prosojnost_proc, _slika_z_odtisom):
+    """Hitro ustvari bajte PNG za prenos kontrolne slike z označenimi odtisi."""
+    buf = io.BytesIO()
+    Image.fromarray(_slika_z_odtisom).save(buf, format="PNG", compress_level=1)
+    return buf.getvalue()
